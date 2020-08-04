@@ -31,4 +31,4 @@ jobs:
         vs-version: '16.6.2'
     # Run MSBuild
     - name: Build Solution
-      run: msbuild "$GITHUB_WORKSPACE\Source\dolphin-emu.sln" /verbosity:minimal
+      run: msbuild "D:\a\dolphin-mpn\dolphin-mpn\Source\dolphin-emu.sln" /verbosity:minimal
