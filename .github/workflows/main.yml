@@ -20,12 +20,13 @@ jobs:
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
     # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+    - name: Checkout GitHub Code
     - uses: actions/checkout@v2
     # Submoudle
-    - name: Checkout submodules
+    - name: Checkout Submodles
       run: git submodule update --init --recursive
     # Setup MSBuild For Later Usage
-    - name: setup-msbuild
+    - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v1.0.1
       with:
         vs-version: '16.6.2'
