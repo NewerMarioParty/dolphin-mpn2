@@ -23,9 +23,6 @@ jobs:
     # Submoudle
     - name: Checkout Submodles
       run: git submodule update --init --recursive
-    # Setup Build Directory
-    - name: Make Build Directory
-      run: cd dolphin-mpn && mkdir build && cd build
     # Setup CMake
     - name: Setup CMake
       uses: Symbitic/install-cmake@v0.1.0
@@ -33,7 +30,7 @@ jobs:
         platform: linux
     # Run CMake
     - name: Run CMake
-      run: cmake .. -DLINUX_LOCAL_DEV=true
+      run: mkdir build && cd build && cmake .. -DLINUX_LOCAL_DEV=true
     # Build Project
     - name: Run Make
       run: make
