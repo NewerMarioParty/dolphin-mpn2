@@ -31,4 +31,10 @@ jobs:
         vs-version: '16.6.2'
     # Run MSBuild
     - name: Build Solution
-      run: msbuild "D:\a\dolphin-mpn\dolphin-mpn\Source\dolphin-emu.sln" /verbosity:minimal
+      run: msbuild "D:\a\dolphin-mpn\dolphin-mpn\Source\dolphin-emu.sln" /verbosity:minimal /property:Configuration=Release  /property:Platform=x64
+    # Upload Artifact
+    - name: Upload Build Artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: DolphinMPN-win32
+        path: D:\a\dolphin-mpn\dolphin-mpn\Binary\x64
