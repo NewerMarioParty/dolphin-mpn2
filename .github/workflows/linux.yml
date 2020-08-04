@@ -28,15 +28,15 @@ jobs:
       run: mkdir build && cd build
     # Setup CMake
     - name: Setup CMake
-    - uses: Symbitic/install-cmake@v0.1.0
+      uses: Symbitic/install-cmake@v0.1.0
       with:
         platform: linux
     # Run CMake
     - name: Run CMake
-    - run: cmake .. -DLINUX_LOCAL_DEV=true
+      run: cmake .. -DLINUX_LOCAL_DEV=true
     # Build Project
     - name: Run Make
-    - run: make
+      run: make
     # Configure Dolphin
     - name: Configure Dolphin
       run: cp -r ../Data/Sys/ Binaries/ && p -r ../Data/User/ Binaries/ && cp -r ../Data/Dolphin.png/ Binaries/ && touch Binaries/portable.txt
