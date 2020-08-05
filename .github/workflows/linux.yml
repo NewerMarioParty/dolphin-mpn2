@@ -36,10 +36,10 @@ jobs:
       run: cd build && make
     # Configure Dolphin
     - name: Configure Dolphin
-      run: cd build && cp -r ../Data/Sys/ Binaries/ && p -r ../Data/User/ Binaries/ && cp -r ../Data/Dolphin.png/ Binaries/ && touch Binaries/portable.txt
+      run: cd build && cp -r ../Data/Sys/ Binaries/ && cp -r ../Data/User/ Binaries/ && cp -r ../Data/Dolphin.png/ Binaries/ && touch Binaries/portable.txt
     # Upload Artifact
     - name: Upload Build Artifact
       uses: actions/upload-artifact@v2
       with:
         name: DolphinMPN-Linux
-        path: /home/runner/work/dolphin-mpn/dolphin-mpn/build/Binaries/dolphin-emu
+        path: /home/runner/work/dolphin-mpn/dolphin-mpn/build/Binaries/
