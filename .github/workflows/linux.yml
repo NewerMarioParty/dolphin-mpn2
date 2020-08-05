@@ -27,7 +27,7 @@ jobs:
         platform: linux
     # Setup Packages
     - name: Setup Packages
-      run: sudo apt install git cmake ffmpeg libavcodec-dev libevdev-dev libusb-1.0-0-dev libavformat-dev libswscale-dev libsfml-dev libminiupnpc-dev libmbedtls-dev curl libhidapi-dev libwxbase3.0-dev libwxgtk3.0-dev libpangocairo-1.0-0 libgtk2.0-dev libbluetooth-dev qt5-default qtbase5-private-dev libudev-dev
+      run: sudo apt update && sudo apt upgrade && sudo apt update && sudo apt install git cmake ffmpeg libavcodec-dev libevdev-dev libusb-1.0-0-dev libavformat-dev libswscale-dev libsfml-dev libminiupnpc-dev libmbedtls-dev curl libhidapi-dev libwxbase3.0-dev libwxgtk3.0-dev libpangocairo-1.0-0 libgtk2.0-dev libbluetooth-dev qt5-default qtbase5-private-dev libudev-dev
     # Run CMake
     - name: Run CMake
       run: mkdir build && cd build && cmake .. -DLINUX_LOCAL_DEV=true
