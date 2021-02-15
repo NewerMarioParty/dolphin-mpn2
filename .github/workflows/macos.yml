@@ -30,7 +30,7 @@ jobs:
       run: brew install qt5 pkgconfig
     # Use Static ZSTD
     - name: Remove ZSTD
-      run: brew uninstall zstd --force
+      run: brew uninstall zstd curl php --force --ignore-dependencies
     # Run CMake
     - name: Run CMake
       run: mkdir -p build && cd build && cmake .. -G Ninja -DCMAKE_CXX_FLAGS="-Xclang -fcolor-diagnostics" -DCMAKE_PREFIX_PATH=$(brew --prefix qt5)
