@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
 package org.dolphinemu.dolphinemu.utils;
 
 import android.graphics.Bitmap;
@@ -8,10 +10,9 @@ import java.io.FileOutputStream;
 
 public final class CoverHelper
 {
-  private static String baseUrl = "https://art.gametdb.com/wii/cover/%s/%s.png";
-
   public static String buildGameTDBUrl(GameFile game, String region)
   {
+    String baseUrl = "https://art.gametdb.com/wii/cover/%s/%s.png";
     return String.format(baseUrl, region, game.getGameTdbId());
   }
 
@@ -32,22 +33,28 @@ public final class CoverHelper
       case 2: // PAL
         switch (game.getCountry())
         {
-          case 2: // German
-            region = "DE";
+          case 3: // Australia
+            region = "AU";
             break;
-          case 3: // French
+          case 4: // France
             region = "FR";
             break;
-          case 4: // Spanish
-            region = "ES";
+          case 5: // Germany
+            region = "DE";
             break;
-          case 5: // Italian
+          case 6: // Italy
             region = "IT";
             break;
-          case 6: // Dutch
+          case 8: // Netherlands
             region = "NL";
             break;
-          case 1: // English
+          case 9: // Russia
+            region = "RU";
+            break;
+          case 10: // Spain
+            region = "ES";
+            break;
+          case 0: // Europe
           default:
             region = "EN";
             break;

@@ -1,19 +1,17 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
 package org.dolphinemu.dolphinemu.features.settings.ui;
 
-import android.content.Context;
-import android.content.IntentFilter;
 import android.os.Bundle;
 import android.text.TextUtils;
 
+import androidx.core.app.ComponentActivity;
+
 import org.dolphinemu.dolphinemu.R;
 import org.dolphinemu.dolphinemu.features.settings.model.Settings;
+import org.dolphinemu.dolphinemu.utils.AfterDirectoryInitializationRunner;
 import org.dolphinemu.dolphinemu.utils.DirectoryInitialization;
-import org.dolphinemu.dolphinemu.utils.DirectoryInitialization.DirectoryInitializationState;
-import org.dolphinemu.dolphinemu.utils.DirectoryStateReceiver;
 import org.dolphinemu.dolphinemu.utils.Log;
-
-import java.util.HashSet;
-import java.util.Set;
 
 public final class SettingsActivityPresenter
 {
@@ -21,36 +19,40 @@ public final class SettingsActivityPresenter
 
   private SettingsActivityView mView;
 
-  private Settings mSettings = new Settings();
-
-  private int mStackCount;
+  private Settings mSettings;
 
   private boolean mShouldSave;
 
-  private DirectoryStateReceiver directoryStateReceiver;
+  private MenuTag mMenuTag;
+  private String mGameId;
+  private int mRevision;
+  private boolean mIsWii;
+  private ComponentActivity mActivity;
 
-  private MenuTag menuTag;
-  private String gameId;
-  private Context context;
-
-  private final Set<String> modifiedSettings = new HashSet<>();
-
-  SettingsActivityPresenter(SettingsActivityView view)
+  SettingsActivityPresenter(SettingsActivityView view, Settings settings)
   {
     mView = view;
+    mSettings = settings;
   }
 
-  public void onCreate(Bundle savedInstanceState, MenuTag menuTag, String gameId, Context context)
+  public void onCreate(Bundle savedInstanceState, MenuTag menuTag, String gameId, int revision,
+          boolean isWii, ComponentActivity activity)
   {
-    if (savedInstanceState == null)
+    this.mMenuTag = menuTag;
+    this.mGameId = gameId;
+    this.mRevision = revision;
+    this.mIsWii = isWii;
+    this.mActivity = activity;
+
+    mShouldSave = savedInstanceState != null && savedInstanceState.getBoolean(KEY_SHOULD_SAVE);
+  }
+
+  public void onDestroy()
+  {
+    if (mSettings != null)
     {
-      this.menuTag = menuTag;
-      this.gameId = gameId;
-      this.context = context;
-    }
-    else
-    {
-      mShouldSave = savedInstanceState.getBoolean(KEY_SHOULD_SAVE);
+      mSettings.close();
+      mSettings = null;
     }
   }
 
@@ -63,9 +65,9 @@ public final class SettingsActivityPresenter
   {
     if (mSettings.isEmpty())
     {
-      if (!TextUtils.isEmpty(gameId))
+      if (!TextUtils.isEmpty(mGameId))
       {
-        mSettings.loadSettings(gameId, mView);
+        mSettings.loadSettings(mView, mGameId, mRevision, mIsWii);
 
         if (mSettings.gameIniContainsJunk())
         {
@@ -74,11 +76,11 @@ public final class SettingsActivityPresenter
       }
       else
       {
-        mSettings.loadSettings(mView);
+        mSettings.loadSettings(mView, mIsWii);
       }
     }
 
-    mView.showSettingsFragment(menuTag, null, false, gameId);
+    mView.showSettingsFragment(mMenuTag, null, false, mGameId);
     mView.onSettingsFileLoaded(mSettings);
   }
 
@@ -91,39 +93,11 @@ public final class SettingsActivityPresenter
     else
     {
       mView.showLoading();
-      IntentFilter statusIntentFilter = new IntentFilter(
-              DirectoryInitialization.BROADCAST_ACTION);
 
-      directoryStateReceiver =
-              new DirectoryStateReceiver(directoryInitializationState ->
-              {
-                if (directoryInitializationState ==
-                        DirectoryInitializationState.DOLPHIN_DIRECTORIES_INITIALIZED)
-                {
-                  mView.hideLoading();
-                  loadSettingsUI();
-                }
-                else if (directoryInitializationState ==
-                        DirectoryInitializationState.EXTERNAL_STORAGE_PERMISSION_NEEDED)
-                {
-                  mView.showPermissionNeededHint();
-                  mView.hideLoading();
-                }
-                else if (directoryInitializationState ==
-                        DirectoryInitializationState.CANT_FIND_EXTERNAL_STORAGE)
-                {
-                  mView.showExternalStorageNotMountedHint();
-                  mView.hideLoading();
-                }
-              });
-
-      mView.startDirectoryInitializationService(directoryStateReceiver, statusIntentFilter);
+      new AfterDirectoryInitializationRunner()
+              .setFinishedCallback(mView::hideLoading)
+              .runWithLifecycle(mActivity, true, this::loadSettingsUI);
     }
-  }
-
-  public void setSettings(Settings settings)
-  {
-    mSettings = settings;
   }
 
   public Settings getSettings()
@@ -134,61 +108,20 @@ public final class SettingsActivityPresenter
   public void clearSettings()
   {
     mSettings.clearSettings();
-    onSettingChanged(null);
+    onSettingChanged();
   }
 
   public void onStop(boolean finishing)
   {
-    if (directoryStateReceiver != null)
-    {
-      mView.stopListeningToDirectoryInitializationService(directoryStateReceiver);
-      directoryStateReceiver = null;
-    }
-
     if (mSettings != null && finishing && mShouldSave)
     {
       Log.debug("[SettingsActivity] Settings activity stopping. Saving settings to INI...");
-      mSettings.saveSettings(mView, context, modifiedSettings);
+      mSettings.saveSettings(mView, mActivity);
     }
   }
 
-  public void addToStack()
+  public void onSettingChanged()
   {
-    mStackCount++;
-  }
-
-  public void onBackPressed()
-  {
-    if (mStackCount > 0)
-    {
-      mView.popBackStack();
-      mStackCount--;
-    }
-    else
-    {
-      mView.finish();
-    }
-  }
-
-  public boolean handleOptionsItem(int itemId)
-  {
-    switch (itemId)
-    {
-      case R.id.menu_save_exit:
-        mView.finish();
-        return true;
-    }
-
-    return false;
-  }
-
-  public void onSettingChanged(String key)
-  {
-    if (key != null)
-    {
-      modifiedSettings.add(key);
-    }
-
     mShouldSave = true;
   }
 
@@ -207,8 +140,8 @@ public final class SettingsActivityPresenter
     if (value != 0) // Not disabled
     {
       Bundle bundle = new Bundle();
-      bundle.putInt(SettingsFragmentPresenter.ARG_CONTROLLER_TYPE, value / 6);
-      mView.showSettingsFragment(key, bundle, true, gameId);
+      bundle.putInt(SettingsFragmentPresenter.ARG_CONTROLLER_TYPE, value);
+      mView.showSettingsFragment(key, bundle, true, mGameId);
     }
   }
 
@@ -217,11 +150,11 @@ public final class SettingsActivityPresenter
     switch (value)
     {
       case 1:
-        mView.showSettingsFragment(menuTag, null, true, gameId);
+        mView.showSettingsFragment(menuTag, null, true, mGameId);
         break;
 
       case 2:
-        mView.showToastMessage("Please make sure Continuous Scanning is enabled in Core Settings.");
+        mView.showToastMessage(mActivity.getString(R.string.make_sure_continuous_scan_enabled));
         break;
     }
   }
@@ -232,12 +165,7 @@ public final class SettingsActivityPresenter
     {
       Bundle bundle = new Bundle();
       bundle.putInt(SettingsFragmentPresenter.ARG_CONTROLLER_TYPE, value);
-      mView.showSettingsFragment(menuTag, bundle, true, gameId);
+      mView.showSettingsFragment(menuTag, bundle, true, mGameId);
     }
-  }
-
-  public void onFileConfirmed(String file)
-  {
-    SettingsAdapter.onFilePickerConfirmation(file);
   }
 }

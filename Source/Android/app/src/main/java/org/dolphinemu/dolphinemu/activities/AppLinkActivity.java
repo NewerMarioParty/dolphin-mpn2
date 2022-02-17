@@ -1,25 +1,20 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
 package org.dolphinemu.dolphinemu.activities;
 
-import android.content.BroadcastReceiver;
-import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
 import android.net.Uri;
 import android.os.Bundle;
+import android.util.Log;
 
 import androidx.fragment.app.FragmentActivity;
-import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 
-import android.util.Log;
-import android.widget.Toast;
-
-import org.dolphinemu.dolphinemu.R;
 import org.dolphinemu.dolphinemu.model.GameFile;
-import org.dolphinemu.dolphinemu.utils.DirectoryInitialization;
-import org.dolphinemu.dolphinemu.services.GameFileCacheService;
+import org.dolphinemu.dolphinemu.services.GameFileCacheManager;
 import org.dolphinemu.dolphinemu.ui.main.TvMainActivity;
+import org.dolphinemu.dolphinemu.utils.AfterDirectoryInitializationRunner;
 import org.dolphinemu.dolphinemu.utils.AppLinkHelper;
-import org.dolphinemu.dolphinemu.utils.DirectoryStateReceiver;
+import org.dolphinemu.dolphinemu.utils.DirectoryInitialization;
 
 /**
  * Linker between leanback homescreen and app
@@ -29,8 +24,7 @@ public class AppLinkActivity extends FragmentActivity
   private static final String TAG = "AppLinkActivity";
 
   private AppLinkHelper.PlayAction playAction;
-  private DirectoryStateReceiver directoryStateReceiver;
-  private BroadcastReceiver gameFileCacheReceiver;
+  private AfterDirectoryInitializationRunner mAfterDirectoryInitializationRunner;
 
   @Override
   protected void onCreate(Bundle savedInstanceState)
@@ -68,53 +62,19 @@ public class AppLinkActivity extends FragmentActivity
    */
   private void initResources()
   {
-    IntentFilter directoryStateIntentFilter = new IntentFilter(
-            DirectoryInitialization.BROADCAST_ACTION);
+    mAfterDirectoryInitializationRunner = new AfterDirectoryInitializationRunner();
+    mAfterDirectoryInitializationRunner.runWithLifecycle(this, true, () -> tryPlay(playAction));
 
-    IntentFilter gameFileCacheIntentFilter = new IntentFilter(
-            GameFileCacheService.BROADCAST_ACTION);
-
-    directoryStateReceiver =
-            new DirectoryStateReceiver(directoryInitializationState ->
-            {
-              if (directoryInitializationState ==
-                      DirectoryInitialization.DirectoryInitializationState.DOLPHIN_DIRECTORIES_INITIALIZED)
-              {
-                tryPlay(playAction);
-              }
-              else if (directoryInitializationState ==
-                      DirectoryInitialization.DirectoryInitializationState.EXTERNAL_STORAGE_PERMISSION_NEEDED)
-              {
-                Toast.makeText(this, R.string.write_permission_needed, Toast.LENGTH_SHORT)
-                        .show();
-              }
-              else if (directoryInitializationState ==
-                      DirectoryInitialization.DirectoryInitializationState.CANT_FIND_EXTERNAL_STORAGE)
-              {
-                Toast.makeText(this, R.string.external_storage_not_mounted, Toast.LENGTH_SHORT)
-                        .show();
-              }
-            });
-
-    gameFileCacheReceiver =
-            new BroadcastReceiver()
-            {
-              @Override
-              public void onReceive(Context context, Intent intent)
-              {
-                if (DirectoryInitialization.areDolphinDirectoriesReady())
-                {
-                  tryPlay(playAction);
-                }
-              }
-            };
-
-    LocalBroadcastManager broadcastManager = LocalBroadcastManager.getInstance(this);
-    broadcastManager.registerReceiver(directoryStateReceiver, directoryStateIntentFilter);
-    broadcastManager.registerReceiver(gameFileCacheReceiver, gameFileCacheIntentFilter);
+    GameFileCacheManager.isLoading().observe(this, (isLoading) ->
+    {
+      if (!isLoading && DirectoryInitialization.areDolphinDirectoriesReady())
+      {
+        tryPlay(playAction);
+      }
+    });
 
     DirectoryInitialization.start(this);
-    GameFileCacheService.startLoad(this);
+    GameFileCacheManager.startLoad(this);
   }
 
   /**
@@ -133,11 +93,11 @@ public class AppLinkActivity extends FragmentActivity
     // TODO: This approach of getting the game from the game file cache without rescanning the
     //       library means that we can fail to launch games if the cache file has been deleted.
 
-    GameFile game = GameFileCacheService.getGameFileByGameId(action.getGameId());
+    GameFile game = GameFileCacheManager.getGameFileByGameId(action.getGameId());
 
     // If game == null and the load isn't done, wait for the next GameFileCacheService broadcast.
     // If game == null and the load is done, call play with a null game, making us exit in failure.
-    if (game != null || GameFileCacheService.hasLoadedCache())
+    if (game != null || !GameFileCacheManager.isLoading().getValue())
     {
       play(action, game);
     }
@@ -162,11 +122,7 @@ public class AppLinkActivity extends FragmentActivity
 
   private void startGame(GameFile game)
   {
-    if (directoryStateReceiver != null)
-    {
-      LocalBroadcastManager.getInstance(this).unregisterReceiver(directoryStateReceiver);
-      directoryStateReceiver = null;
-    }
-    EmulationActivity.launch(this, game);
+    mAfterDirectoryInitializationRunner.cancel();
+    EmulationActivity.launch(this, GameFileCacheManager.findSecondDiscAndGetPaths(game), false);
   }
 }

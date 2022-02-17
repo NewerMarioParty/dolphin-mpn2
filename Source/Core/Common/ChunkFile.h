@@ -1,6 +1,5 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
@@ -26,16 +25,14 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
+
 #include "Common/Assert.h"
 #include "Common/CommonTypes.h"
+#include "Common/EnumMap.h"
 #include "Common/Flag.h"
 #include "Common/Inline.h"
 #include "Common/Logging/Log.h"
-
-// XXX: Replace this with std::is_trivially_copyable<T> once we stop using volatile
-// on things that are put in savestates, as volatile types are not trivially copyable.
-template <typename T>
-constexpr bool IsTriviallyCopyable = std::is_trivially_copyable<std::remove_volatile_t<T>>::value;
 
 // Wrapper class
 class PointerWrap
@@ -181,13 +178,19 @@ public:
     DoArray(x.data(), static_cast<u32>(x.size()));
   }
 
-  template <typename T, typename std::enable_if_t<IsTriviallyCopyable<T>, int> = 0>
+  template <typename V, auto last_member, typename = decltype(last_member)>
+  void DoArray(Common::EnumMap<V, last_member>& x)
+  {
+    DoArray(x.data(), static_cast<u32>(x.size()));
+  }
+
+  template <typename T, typename std::enable_if_t<std::is_trivially_copyable_v<T>, int> = 0>
   void DoArray(T* x, u32 count)
   {
     DoVoid(x, count * sizeof(T));
   }
 
-  template <typename T, typename std::enable_if_t<!IsTriviallyCopyable<T>, int> = 0>
+  template <typename T, typename std::enable_if_t<!std::is_trivially_copyable_v<T>, int> = 0>
   void DoArray(T* x, u32 count)
   {
     for (u32 i = 0; i < count; ++i)
@@ -198,6 +201,16 @@ public:
   void DoArray(T (&arr)[N])
   {
     DoArray(arr, static_cast<u32>(N));
+  }
+
+  // The caller is required to inspect the mode of this PointerWrap
+  // and deal with the pointer returned from this function themself.
+  [[nodiscard]] u8* DoExternal(u32& count)
+  {
+    Do(count);
+    u8* current = *ptr;
+    *ptr += count;
+    return current;
   }
 
   void Do(Common::Flag& flag)
@@ -211,16 +224,16 @@ public:
   template <typename T>
   void Do(std::atomic<T>& atomic)
   {
-    T temp = atomic.load();
+    T temp = atomic.load(std::memory_order_relaxed);
     Do(temp);
     if (mode == MODE_READ)
-      atomic.store(temp);
+      atomic.store(temp, std::memory_order_relaxed);
   }
 
   template <typename T>
   void Do(T& x)
   {
-    static_assert(IsTriviallyCopyable<T>, "Only sane for trivially copyable types");
+    static_assert(std::is_trivially_copyable_v<T>, "Only sane for trivially copyable types");
     // Note:
     // Usually we can just use x = **ptr, etc.  However, this doesn't work
     // for unions containing BitFields (long story, stupid language rules)
@@ -267,9 +280,10 @@ public:
 
     if (mode == PointerWrap::MODE_READ && cookie != arbitraryNumber)
     {
-      PanicAlertT("Error: After \"%s\", found %d (0x%X) instead of save marker %d (0x%X). Aborting "
-                  "savestate load...",
-                  prevName.c_str(), cookie, cookie, arbitraryNumber, arbitraryNumber);
+      PanicAlertFmtT(
+          "Error: After \"{0}\", found {1} ({2:#x}) instead of save marker {3} ({4:#x}). Aborting "
+          "savestate load...",
+          prevName, cookie, cookie, arbitraryNumber, arbitraryNumber);
       mode = PointerWrap::MODE_MEASURE;
     }
   }
@@ -320,8 +334,8 @@ private:
 
     case MODE_VERIFY:
       DEBUG_ASSERT_MSG(COMMON, !memcmp(data, *ptr, size),
-                       "Savestate verification failure: buf %p != %p (size %u).\n", data, *ptr,
-                       size);
+                       "Savestate verification failure: buf {} != {} (size {}).\n", fmt::ptr(data),
+                       fmt::ptr(*ptr), size);
       break;
     }
 

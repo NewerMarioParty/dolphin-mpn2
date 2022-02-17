@@ -1,9 +1,9 @@
 // Copyright 2010 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "VideoCommon/FramebufferManager.h"
 
+#include <fmt/format.h>
 #include <memory>
 
 #include "Common/ChunkFile.h"
@@ -43,38 +43,38 @@ bool FramebufferManager::Initialize()
 {
   if (!CreateEFBFramebuffer())
   {
-    PanicAlert("Failed to create EFB framebuffer");
+    PanicAlertFmt("Failed to create EFB framebuffer");
     return false;
   }
 
   m_efb_cache_tile_size = static_cast<u32>(std::max(g_ActiveConfig.iEFBAccessTileSize, 0));
   if (!CreateReadbackFramebuffer())
   {
-    PanicAlert("Failed to create EFB readback framebuffer");
+    PanicAlertFmt("Failed to create EFB readback framebuffer");
     return false;
   }
 
   if (!CompileReadbackPipelines())
   {
-    PanicAlert("Failed to compile EFB readback pipelines");
+    PanicAlertFmt("Failed to compile EFB readback pipelines");
     return false;
   }
 
   if (!CompileConversionPipelines())
   {
-    PanicAlert("Failed to compile EFB conversion pipelines");
+    PanicAlertFmt("Failed to compile EFB conversion pipelines");
     return false;
   }
 
   if (!CompileClearPipelines())
   {
-    PanicAlert("Failed to compile EFB clear pipelines");
+    PanicAlertFmt("Failed to compile EFB clear pipelines");
     return false;
   }
 
   if (!CompilePokePipelines())
   {
-    PanicAlert("Failed to compile EFB poke pipelines");
+    PanicAlertFmt("Failed to compile EFB poke pipelines");
     return false;
   }
 
@@ -89,7 +89,7 @@ void FramebufferManager::RecreateEFBFramebuffer()
   DestroyReadbackFramebuffer();
   DestroyEFBFramebuffer();
   if (!CreateEFBFramebuffer() || !CreateReadbackFramebuffer())
-    PanicAlert("Failed to recreate EFB framebuffer");
+    PanicAlertFmt("Failed to recreate EFB framebuffer");
 }
 
 void FramebufferManager::RecompileShaders()
@@ -101,7 +101,7 @@ void FramebufferManager::RecompileShaders()
   if (!CompileReadbackPipelines() || !CompileConversionPipelines() || !CompileClearPipelines() ||
       !CompilePokePipelines())
   {
-    PanicAlert("Failed to recompile EFB pipelines");
+    PanicAlertFmt("Failed to recompile EFB pipelines");
   }
 }
 
@@ -171,9 +171,10 @@ bool FramebufferManager::CreateEFBFramebuffer()
   const TextureConfig efb_depth_texture_config = GetEFBDepthTextureConfig();
 
   // We need a second texture to swap with for changing pixel formats
-  m_efb_color_texture = g_renderer->CreateTexture(efb_color_texture_config);
-  m_efb_depth_texture = g_renderer->CreateTexture(efb_depth_texture_config);
-  m_efb_convert_color_texture = g_renderer->CreateTexture(efb_color_texture_config);
+  m_efb_color_texture = g_renderer->CreateTexture(efb_color_texture_config, "EFB color texture");
+  m_efb_depth_texture = g_renderer->CreateTexture(efb_depth_texture_config, "EFB depth texture");
+  m_efb_convert_color_texture =
+      g_renderer->CreateTexture(efb_color_texture_config, "EFB convert color texture");
   if (!m_efb_color_texture || !m_efb_depth_texture || !m_efb_convert_color_texture)
     return false;
 
@@ -189,7 +190,8 @@ bool FramebufferManager::CreateEFBFramebuffer()
   {
     m_efb_resolve_color_texture = g_renderer->CreateTexture(
         TextureConfig(efb_color_texture_config.width, efb_color_texture_config.height, 1,
-                      efb_color_texture_config.layers, 1, efb_color_texture_config.format, 0));
+                      efb_color_texture_config.layers, 1, efb_color_texture_config.format, 0),
+        "EFB color resolve texture");
     if (!m_efb_resolve_color_texture)
       return false;
   }
@@ -200,7 +202,8 @@ bool FramebufferManager::CreateEFBFramebuffer()
     m_efb_depth_resolve_texture = g_renderer->CreateTexture(
         TextureConfig(efb_depth_texture_config.width, efb_depth_texture_config.height, 1,
                       efb_depth_texture_config.layers, 1, GetEFBDepthCopyFormat(),
-                      AbstractTextureFlag_RenderTarget));
+                      AbstractTextureFlag_RenderTarget),
+        "EFB depth resolve texture");
     if (!m_efb_depth_resolve_texture)
       return false;
 
@@ -258,8 +261,8 @@ AbstractTexture* FramebufferManager::ResolveEFBColorTexture(const MathUtil::Rect
 AbstractTexture* FramebufferManager::ResolveEFBDepthTexture(const MathUtil::Rectangle<int>& region,
                                                             bool force_r32f)
 {
-  if (!IsEFBMultisampled() || !force_r32f ||
-      m_efb_depth_texture->GetFormat() == AbstractTextureFormat::R32F)
+  if (!IsEFBMultisampled() &&
+      (!force_r32f || m_efb_depth_texture->GetFormat() == AbstractTextureFormat::D32F))
   {
     return m_efb_depth_texture.get();
   }
@@ -271,7 +274,8 @@ AbstractTexture* FramebufferManager::ResolveEFBDepthTexture(const MathUtil::Rect
   m_efb_depth_texture->FinishedRendering();
   g_renderer->BeginUtilityDrawing();
   g_renderer->SetAndDiscardFramebuffer(m_efb_depth_resolve_framebuffer.get());
-  g_renderer->SetPipeline(m_efb_depth_resolve_pipeline.get());
+  g_renderer->SetPipeline(IsEFBMultisampled() ? m_efb_depth_resolve_pipeline.get() :
+                                                m_efb_depth_cache.copy_pipeline.get());
   g_renderer->SetTexture(0, m_efb_depth_texture.get());
   g_renderer->SetSamplerState(0, RenderState::GetPointSamplerState());
   g_renderer->SetViewportAndScissor(clamped_region);
@@ -311,9 +315,11 @@ bool FramebufferManager::CompileConversionPipelines()
 {
   for (u32 i = 0; i < NUM_EFB_REINTERPRET_TYPES; i++)
   {
+    EFBReinterpretType convtype = static_cast<EFBReinterpretType>(i);
     std::unique_ptr<AbstractShader> pixel_shader = g_renderer->CreateShaderFromSource(
-        ShaderStage::Pixel, FramebufferShaderGen::GenerateFormatConversionShader(
-                                static_cast<EFBReinterpretType>(i), GetEFBSamples()));
+        ShaderStage::Pixel,
+        FramebufferShaderGen::GenerateFormatConversionShader(convtype, GetEFBSamples()),
+        fmt::format("Framebuffer conversion pixel shader {}", convtype));
     if (!pixel_shader)
       return false;
 
@@ -414,7 +420,7 @@ void FramebufferManager::SetEFBCacheTileSize(u32 size)
   m_efb_cache_tile_size = size;
   DestroyReadbackFramebuffer();
   if (!CreateReadbackFramebuffer())
-    PanicAlert("Failed to create EFB readback framebuffers");
+    PanicAlertFmt("Failed to create EFB readback framebuffers");
 }
 
 void FramebufferManager::InvalidatePeekCache(bool forced)
@@ -472,7 +478,8 @@ bool FramebufferManager::CompileReadbackPipelines()
   if (IsEFBMultisampled())
   {
     auto depth_resolve_shader = g_renderer->CreateShaderFromSource(
-        ShaderStage::Pixel, FramebufferShaderGen::GenerateResolveDepthPixelShader(GetEFBSamples()));
+        ShaderStage::Pixel, FramebufferShaderGen::GenerateResolveDepthPixelShader(GetEFBSamples()),
+        "Depth resolve pixel shader");
     if (!depth_resolve_shader)
       return false;
 
@@ -484,7 +491,8 @@ bool FramebufferManager::CompileReadbackPipelines()
 
   // EFB restore pipeline
   auto restore_shader = g_renderer->CreateShaderFromSource(
-      ShaderStage::Pixel, FramebufferShaderGen::GenerateEFBRestorePixelShader());
+      ShaderStage::Pixel, FramebufferShaderGen::GenerateEFBRestorePixelShader(),
+      "EFB restore pixel shader");
   if (!restore_shader)
     return false;
 
@@ -514,7 +522,7 @@ bool FramebufferManager::CreateReadbackFramebuffer()
     const TextureConfig color_config(IsUsingTiledEFBCache() ? m_efb_cache_tile_size : EFB_WIDTH,
                                      IsUsingTiledEFBCache() ? m_efb_cache_tile_size : EFB_HEIGHT, 1,
                                      1, 1, GetEFBColorFormat(), AbstractTextureFlag_RenderTarget);
-    m_efb_color_cache.texture = g_renderer->CreateTexture(color_config);
+    m_efb_color_cache.texture = g_renderer->CreateTexture(color_config, "EFB color cache");
     if (!m_efb_color_cache.texture)
       return false;
 
@@ -536,7 +544,7 @@ bool FramebufferManager::CreateReadbackFramebuffer()
                                      IsUsingTiledEFBCache() ? m_efb_cache_tile_size : EFB_HEIGHT, 1,
                                      1, 1, GetEFBDepthCopyFormat(),
                                      AbstractTextureFlag_RenderTarget);
-    m_efb_depth_cache.texture = g_renderer->CreateTexture(depth_config);
+    m_efb_depth_cache.texture = g_renderer->CreateTexture(depth_config, "EFB depth cache");
     if (!m_efb_depth_cache.texture)
       return false;
 
@@ -684,7 +692,8 @@ void FramebufferManager::ClearEFB(const MathUtil::Rectangle<int>& rc, bool clear
 bool FramebufferManager::CompileClearPipelines()
 {
   auto vertex_shader = g_renderer->CreateShaderFromSource(
-      ShaderStage::Vertex, FramebufferShaderGen::GenerateClearVertexShader());
+      ShaderStage::Vertex, FramebufferShaderGen::GenerateClearVertexShader(),
+      "Clear vertex shader");
   if (!vertex_shader)
     return false;
 
@@ -837,12 +846,12 @@ bool FramebufferManager::CompilePokePipelines()
 {
   PortableVertexDeclaration vtx_decl = {};
   vtx_decl.position.enable = true;
-  vtx_decl.position.type = VAR_FLOAT;
+  vtx_decl.position.type = ComponentFormat::Float;
   vtx_decl.position.components = 4;
   vtx_decl.position.integer = false;
   vtx_decl.position.offset = offsetof(EFBPokeVertex, position);
   vtx_decl.colors[0].enable = true;
-  vtx_decl.colors[0].type = VAR_UNSIGNED_BYTE;
+  vtx_decl.colors[0].type = ComponentFormat::UByte;
   vtx_decl.colors[0].components = 4;
   vtx_decl.colors[0].integer = false;
   vtx_decl.colors[0].offset = offsetof(EFBPokeVertex, color);
@@ -853,7 +862,8 @@ bool FramebufferManager::CompilePokePipelines()
     return false;
 
   auto poke_vertex_shader = g_renderer->CreateShaderFromSource(
-      ShaderStage::Vertex, FramebufferShaderGen::GenerateEFBPokeVertexShader());
+      ShaderStage::Vertex, FramebufferShaderGen::GenerateEFBPokeVertexShader(),
+      "EFB poke vertex shader");
   if (!poke_vertex_shader)
     return false;
 
@@ -938,7 +948,7 @@ void FramebufferManager::DoLoadState(PointerWrap& p)
   if (!color_tex || !depth_tex ||
       color_tex->texture->GetLayers() != m_efb_color_texture->GetLayers())
   {
-    WARN_LOG(VIDEO, "Failed to deserialize EFB contents. Clearing instead.");
+    WARN_LOG_FMT(VIDEO, "Failed to deserialize EFB contents. Clearing instead.");
     g_renderer->SetAndClearFramebuffer(
         m_efb_framebuffer.get(), {{0.0f, 0.0f, 0.0f, 0.0f}},
         g_ActiveConfig.backend_info.bSupportsReversedDepthRange ? 1.0f : 0.0f);

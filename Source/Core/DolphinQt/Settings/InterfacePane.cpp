@@ -1,6 +1,5 @@
 // Copyright 2017 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "DolphinQt/Settings/InterfacePane.h"
 
@@ -10,6 +9,7 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
+#include <QRadioButton>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -19,10 +19,9 @@
 #include "Common/MsgHandler.h"
 #include "Common/StringUtil.h"
 
+#include "Core/Config/MainSettings.h"
 #include "Core/Config/UISettings.h"
-#include "Core/ConfigManager.h"
 
-#include "DolphinQt/GameList/GameListModel.h"
 #include "DolphinQt/QtUtils/ModalMessageBox.h"
 #include "DolphinQt/Settings.h"
 
@@ -147,12 +146,14 @@ void InterfacePane::CreateUI()
       new QCheckBox(tr("Download Game Covers from GameTDB.com for Use in Grid Mode"));
   m_checkbox_show_debugging_ui = new QCheckBox(tr("Show Debugging UI"));
   m_checkbox_focused_hotkeys = new QCheckBox(tr("Hotkeys Require Window Focus"));
+  m_checkbox_disable_screensaver = new QCheckBox(tr("Inhibit Screensaver During Emulation"));
 
   groupbox_layout->addWidget(m_checkbox_use_builtin_title_database);
   groupbox_layout->addWidget(m_checkbox_use_userstyle);
   groupbox_layout->addWidget(m_checkbox_use_covers);
   groupbox_layout->addWidget(m_checkbox_show_debugging_ui);
   groupbox_layout->addWidget(m_checkbox_focused_hotkeys);
+  groupbox_layout->addWidget(m_checkbox_disable_screensaver);
 }
 
 void InterfacePane::CreateInGame()
@@ -168,15 +169,39 @@ void InterfacePane::CreateInGame()
   m_checkbox_enable_osd = new QCheckBox(tr("Show On-Screen Display Messages"));
   m_checkbox_show_active_title = new QCheckBox(tr("Show Active Title in Window Title"));
   m_checkbox_pause_on_focus_lost = new QCheckBox(tr("Pause on Focus Loss"));
-  m_checkbox_hide_mouse = new QCheckBox(tr("Always Hide Mouse Cursor"));
 
+  auto* mouse_groupbox = new QGroupBox(tr("Mouse Cursor Visibility"));
+  auto* m_vboxlayout_hide_mouse = new QVBoxLayout;
+  mouse_groupbox->setLayout(m_vboxlayout_hide_mouse);
+
+  m_radio_cursor_visible_movement = new QRadioButton(tr("On Movement"));
+  m_radio_cursor_visible_movement->setToolTip(
+      tr("Mouse Cursor hides after inactivity and returns upon Mouse Cursor movement."));
+  m_radio_cursor_visible_never = new QRadioButton(tr("Never"));
+  m_radio_cursor_visible_never->setToolTip(
+      tr("Mouse Cursor will never be visible while a game is running."));
+  m_radio_cursor_visible_always = new QRadioButton(tr("Always"));
+  m_radio_cursor_visible_always->setToolTip(tr("Mouse Cursor will always be visible."));
+
+  m_vboxlayout_hide_mouse->addWidget(m_radio_cursor_visible_movement);
+  m_vboxlayout_hide_mouse->addWidget(m_radio_cursor_visible_never);
+  m_vboxlayout_hide_mouse->addWidget(m_radio_cursor_visible_always);
+
+  m_checkbox_lock_mouse = new QCheckBox(tr("Lock Mouse Cursor"));
+  m_checkbox_lock_mouse->setToolTip(tr("Will lock the Mouse Cursor to the Render Widget as long as "
+                                       "it has focus. You can set a hotkey to unlock it."));
+
+  mouse_groupbox->setLayout(m_vboxlayout_hide_mouse);
   groupbox_layout->addWidget(m_checkbox_top_window);
   groupbox_layout->addWidget(m_checkbox_confirm_on_stop);
   groupbox_layout->addWidget(m_checkbox_use_panic_handlers);
   groupbox_layout->addWidget(m_checkbox_enable_osd);
   groupbox_layout->addWidget(m_checkbox_show_active_title);
   groupbox_layout->addWidget(m_checkbox_pause_on_focus_lost);
-  groupbox_layout->addWidget(m_checkbox_hide_mouse);
+  groupbox_layout->addWidget(mouse_groupbox);
+#ifdef _WIN32
+  groupbox_layout->addWidget(m_checkbox_lock_mouse);
+#endif
 }
 
 void InterfacePane::ConnectLayout()
@@ -184,11 +209,12 @@ void InterfacePane::ConnectLayout()
   connect(m_checkbox_use_builtin_title_database, &QCheckBox::toggled, this,
           &InterfacePane::OnSaveConfig);
   connect(m_checkbox_use_covers, &QCheckBox::toggled, this, &InterfacePane::OnSaveConfig);
+  connect(m_checkbox_disable_screensaver, &QCheckBox::toggled, this, &InterfacePane::OnSaveConfig);
   connect(m_checkbox_show_debugging_ui, &QCheckBox::toggled, this, &InterfacePane::OnSaveConfig);
   connect(m_checkbox_focused_hotkeys, &QCheckBox::toggled, this, &InterfacePane::OnSaveConfig);
-  connect(m_combobox_theme, qOverload<const QString&>(&QComboBox::currentIndexChanged),
-          &Settings::Instance(), &Settings::SetThemeName);
-  connect(m_combobox_userstyle, qOverload<const QString&>(&QComboBox::currentIndexChanged), this,
+  connect(m_combobox_theme, qOverload<int>(&QComboBox::currentIndexChanged), this,
+          [=](int index) { Settings::Instance().SetThemeName(m_combobox_theme->itemText(index)); });
+  connect(m_combobox_userstyle, qOverload<int>(&QComboBox::currentIndexChanged), this,
           &InterfacePane::OnSaveConfig);
   connect(m_combobox_language, qOverload<int>(&QComboBox::currentIndexChanged), this,
           &InterfacePane::OnSaveConfig);
@@ -198,20 +224,26 @@ void InterfacePane::ConnectLayout()
   connect(m_checkbox_show_active_title, &QCheckBox::toggled, this, &InterfacePane::OnSaveConfig);
   connect(m_checkbox_enable_osd, &QCheckBox::toggled, this, &InterfacePane::OnSaveConfig);
   connect(m_checkbox_pause_on_focus_lost, &QCheckBox::toggled, this, &InterfacePane::OnSaveConfig);
-  connect(m_checkbox_hide_mouse, &QCheckBox::toggled, &Settings::Instance(),
-          &Settings::SetHideCursor);
+  connect(m_radio_cursor_visible_movement, &QRadioButton::toggled, this,
+          &InterfacePane::OnCursorVisibleMovement);
+  connect(m_radio_cursor_visible_never, &QRadioButton::toggled, this,
+          &InterfacePane::OnCursorVisibleNever);
+  connect(m_radio_cursor_visible_always, &QRadioButton::toggled, this,
+          &InterfacePane::OnCursorVisibleAlways);
+  connect(m_checkbox_lock_mouse, &QCheckBox::toggled, &Settings::Instance(),
+          &Settings::SetLockCursor);
   connect(m_checkbox_use_userstyle, &QCheckBox::toggled, this, &InterfacePane::OnSaveConfig);
 }
 
 void InterfacePane::LoadConfig()
 {
-  const SConfig& startup_params = SConfig::GetInstance();
-  m_checkbox_use_builtin_title_database->setChecked(startup_params.m_use_builtin_title_database);
+  m_checkbox_use_builtin_title_database->setChecked(
+      Config::Get(Config::MAIN_USE_BUILT_IN_TITLE_DATABASE));
   m_checkbox_show_debugging_ui->setChecked(Settings::Instance().IsDebugModeEnabled());
   m_combobox_language->setCurrentIndex(m_combobox_language->findData(
-      QString::fromStdString(SConfig::GetInstance().m_InterfaceLanguage)));
+      QString::fromStdString(Config::Get(Config::MAIN_INTERFACE_LANGUAGE))));
   m_combobox_theme->setCurrentIndex(
-      m_combobox_theme->findText(QString::fromStdString(SConfig::GetInstance().theme_name)));
+      m_combobox_theme->findText(QString::fromStdString(Config::Get(Config::MAIN_THEME_NAME))));
 
   const QString userstyle = Settings::Instance().GetCurrentUserStyle();
   const int index = m_combobox_userstyle->findData(QFileInfo(userstyle).fileName());
@@ -228,20 +260,28 @@ void InterfacePane::LoadConfig()
 
   // Render Window Options
   m_checkbox_top_window->setChecked(Settings::Instance().IsKeepWindowOnTopEnabled());
-  m_checkbox_confirm_on_stop->setChecked(startup_params.bConfirmStop);
-  m_checkbox_use_panic_handlers->setChecked(startup_params.bUsePanicHandlers);
-  m_checkbox_enable_osd->setChecked(startup_params.bOnScreenDisplayMessages);
-  m_checkbox_show_active_title->setChecked(startup_params.m_show_active_title);
-  m_checkbox_pause_on_focus_lost->setChecked(startup_params.m_PauseOnFocusLost);
+  m_checkbox_confirm_on_stop->setChecked(Config::Get(Config::MAIN_CONFIRM_ON_STOP));
+  m_checkbox_use_panic_handlers->setChecked(Config::Get(Config::MAIN_USE_PANIC_HANDLERS));
+  m_checkbox_enable_osd->setChecked(Config::Get(Config::MAIN_OSD_MESSAGES));
+  m_checkbox_show_active_title->setChecked(Config::Get(Config::MAIN_SHOW_ACTIVE_TITLE));
+  m_checkbox_pause_on_focus_lost->setChecked(Config::Get(Config::MAIN_PAUSE_ON_FOCUS_LOST));
   m_checkbox_use_covers->setChecked(Config::Get(Config::MAIN_USE_GAME_COVERS));
   m_checkbox_focused_hotkeys->setChecked(Config::Get(Config::MAIN_FOCUSED_HOTKEYS));
-  m_checkbox_hide_mouse->setChecked(Settings::Instance().GetHideCursor());
+  m_radio_cursor_visible_movement->setChecked(Settings::Instance().GetCursorVisibility() ==
+                                              Config::ShowCursor::OnMovement);
+  m_radio_cursor_visible_always->setChecked(Settings::Instance().GetCursorVisibility() ==
+                                            Config::ShowCursor::Constantly);
+  m_radio_cursor_visible_never->setChecked(Settings::Instance().GetCursorVisibility() ==
+                                           Config::ShowCursor::Never);
+
+  m_checkbox_lock_mouse->setChecked(Settings::Instance().GetLockCursor());
+  m_checkbox_disable_screensaver->setChecked(Config::Get(Config::MAIN_DISABLE_SCREENSAVER));
 }
 
 void InterfacePane::OnSaveConfig()
 {
-  SConfig& settings = SConfig::GetInstance();
-  settings.m_use_builtin_title_database = m_checkbox_use_builtin_title_database->isChecked();
+  Config::SetBase(Config::MAIN_USE_BUILT_IN_TITLE_DATABASE,
+                  m_checkbox_use_builtin_title_database->isChecked());
   Settings::Instance().SetDebugModeEnabled(m_checkbox_show_debugging_ui->isChecked());
   Settings::Instance().SetUserStylesEnabled(m_checkbox_use_userstyle->isChecked());
   Settings::Instance().SetCurrentUserStyle(m_combobox_userstyle->currentData().toString());
@@ -253,18 +293,18 @@ void InterfacePane::OnSaveConfig()
 
   // Render Window Options
   Settings::Instance().SetKeepWindowOnTop(m_checkbox_top_window->isChecked());
-  settings.bConfirmStop = m_checkbox_confirm_on_stop->isChecked();
-  settings.bUsePanicHandlers = m_checkbox_use_panic_handlers->isChecked();
-  settings.bOnScreenDisplayMessages = m_checkbox_enable_osd->isChecked();
-  settings.m_show_active_title = m_checkbox_show_active_title->isChecked();
-  settings.m_PauseOnFocusLost = m_checkbox_pause_on_focus_lost->isChecked();
+  Config::SetBase(Config::MAIN_CONFIRM_ON_STOP, m_checkbox_confirm_on_stop->isChecked());
+  Config::SetBase(Config::MAIN_USE_PANIC_HANDLERS, m_checkbox_use_panic_handlers->isChecked());
+  Config::SetBase(Config::MAIN_OSD_MESSAGES, m_checkbox_enable_osd->isChecked());
+  Config::SetBase(Config::MAIN_SHOW_ACTIVE_TITLE, m_checkbox_show_active_title->isChecked());
+  Config::SetBase(Config::MAIN_PAUSE_ON_FOCUS_LOST, m_checkbox_pause_on_focus_lost->isChecked());
 
-  Common::SetEnableAlert(settings.bUsePanicHandlers);
+  Common::SetEnableAlert(Config::Get(Config::MAIN_USE_PANIC_HANDLERS));
 
   auto new_language = m_combobox_language->currentData().toString().toStdString();
-  if (new_language != SConfig::GetInstance().m_InterfaceLanguage)
+  if (new_language != Config::Get(Config::MAIN_INTERFACE_LANGUAGE))
   {
-    SConfig::GetInstance().m_InterfaceLanguage = new_language;
+    Config::SetBase(Config::MAIN_INTERFACE_LANGUAGE, new_language);
     ModalMessageBox::information(
         this, tr("Restart Required"),
         tr("You must restart Dolphin in order for the change to take effect."));
@@ -279,6 +319,22 @@ void InterfacePane::OnSaveConfig()
   }
 
   Config::SetBase(Config::MAIN_FOCUSED_HOTKEYS, m_checkbox_focused_hotkeys->isChecked());
+  Config::SetBase(Config::MAIN_DISABLE_SCREENSAVER, m_checkbox_disable_screensaver->isChecked());
 
-  settings.SaveSettings();
+  Config::Save();
+}
+
+void InterfacePane::OnCursorVisibleMovement()
+{
+  Settings::Instance().SetCursorVisibility(Config::ShowCursor::OnMovement);
+}
+
+void InterfacePane::OnCursorVisibleNever()
+{
+  Settings::Instance().SetCursorVisibility(Config::ShowCursor::Never);
+}
+
+void InterfacePane::OnCursorVisibleAlways()
+{
+  Settings::Instance().SetCursorVisibility(Config::ShowCursor::Constantly);
 }

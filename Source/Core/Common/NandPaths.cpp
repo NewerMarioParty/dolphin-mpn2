@@ -1,6 +1,5 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Common/NandPaths.h"
 
@@ -20,7 +19,9 @@ namespace Common
 std::string RootUserPath(FromWhichRoot from)
 {
   int idx = from == FROM_CONFIGURED_ROOT ? D_WIIROOT_IDX : D_SESSION_WIIROOT_IDX;
-  return File::GetUserPath(idx);
+  std::string dir = File::GetUserPath(idx);
+  dir.pop_back();  // remove trailing path separator
+  return dir;
 }
 
 static std::string RootUserPath(std::optional<FromWhichRoot> from)
@@ -95,6 +96,13 @@ bool IsTitlePath(const std::string& path, std::optional<FromWhichRoot> from, u64
   return true;
 }
 
+static bool IsIllegalCharacter(char c)
+{
+  static const std::unordered_set<char> illegal_chars = {'\"', '*', '/',  ':', '<',
+                                                         '>',  '?', '\\', '|', '\x7f'};
+  return (c >= 0 && c <= 0x1F) || illegal_chars.find(c) != illegal_chars.end();
+}
+
 std::string EscapeFileName(const std::string& filename)
 {
   // Prevent paths from containing special names like ., .., ..., ...., and so on
@@ -105,13 +113,11 @@ std::string EscapeFileName(const std::string& filename)
   std::string filename_with_escaped_double_underscores = ReplaceAll(filename, "__", "__5f____5f__");
 
   // Escape all other characters that need to be escaped
-  static const std::unordered_set<char> chars_to_replace = {'\"', '*', '/',  ':', '<',
-                                                            '>',  '?', '\\', '|', '\x7f'};
   std::string result;
   result.reserve(filename_with_escaped_double_underscores.size());
   for (char c : filename_with_escaped_double_underscores)
   {
-    if ((c >= 0 && c <= 0x1F) || chars_to_replace.find(c) != chars_to_replace.end())
+    if (IsIllegalCharacter(c))
       result.append(fmt::format("__{:02x}__", c));
     else
       result.push_back(c);
@@ -150,5 +156,12 @@ std::string UnescapeFileName(const std::string& filename)
   }
 
   return result;
+}
+
+bool IsFileNameSafe(const std::string_view filename)
+{
+  return !filename.empty() &&
+         !std::all_of(filename.begin(), filename.end(), [](char c) { return c == '.'; }) &&
+         std::none_of(filename.begin(), filename.end(), IsIllegalCharacter);
 }
 }  // namespace Common

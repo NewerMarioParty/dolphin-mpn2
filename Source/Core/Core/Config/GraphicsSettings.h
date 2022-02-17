@@ -1,6 +1,5 @@
 // Copyright 2017 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
@@ -43,8 +42,6 @@ extern const Info<bool> GFX_CACHE_HIRES_TEXTURES;
 extern const Info<bool> GFX_DUMP_EFB_TARGET;
 extern const Info<bool> GFX_DUMP_XFB_TARGET;
 extern const Info<bool> GFX_DUMP_FRAMES_AS_IMAGES;
-extern const Info<bool> GFX_FREE_LOOK;
-extern const Info<FreelookControlType> GFX_FREE_LOOK_CONTROL_TYPE;
 extern const Info<bool> GFX_USE_FFV1;
 extern const Info<std::string> GFX_DUMP_FORMAT;
 extern const Info<std::string> GFX_DUMP_CODEC;
@@ -52,6 +49,7 @@ extern const Info<std::string> GFX_DUMP_ENCODER;
 extern const Info<std::string> GFX_DUMP_PATH;
 extern const Info<int> GFX_BITRATE_KBPS;
 extern const Info<bool> GFX_INTERNAL_RESOLUTION_FRAME_DUMPS;
+extern const Info<int> GFX_PNG_COMPRESSION_LEVEL;
 extern const Info<bool> GFX_ENABLE_GPU_TEXTURE_DECODING;
 extern const Info<bool> GFX_ENABLE_PIXEL_LIGHTING;
 extern const Info<bool> GFX_FAST_DEPTH_CALC;
@@ -121,9 +119,12 @@ extern const Info<bool> GFX_HACK_DISABLE_COPY_TO_VRAM;
 extern const Info<bool> GFX_HACK_DEFER_EFB_COPIES;
 extern const Info<bool> GFX_HACK_IMMEDIATE_XFB;
 extern const Info<bool> GFX_HACK_SKIP_DUPLICATE_XFBS;
+extern const Info<bool> GFX_HACK_EARLY_XFB_OUTPUT;
 extern const Info<bool> GFX_HACK_COPY_EFB_SCALED;
 extern const Info<bool> GFX_HACK_EFB_EMULATE_FORMAT_CHANGES;
 extern const Info<bool> GFX_HACK_VERTEX_ROUDING;
+extern const Info<u32> GFX_HACK_MISSING_COLOR_VALUE;
+extern const Info<bool> GFX_HACK_FAST_TEXTURE_SAMPLING;
 
 // Graphics.GameSpecific
 
