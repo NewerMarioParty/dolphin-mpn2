@@ -1,6 +1,5 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/PowerPC/Jit64/Jit.h"
 
@@ -17,8 +16,8 @@
 #endif
 
 #include "Common/CommonTypes.h"
-#include "Common/File.h"
 #include "Common/GekkoDisassembler.h"
+#include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
 #include "Common/MemoryUtil.h"
 #include "Common/PerformanceCounter.h"
@@ -195,7 +194,8 @@ bool Jit64::HandleStackFault()
   if (!m_enable_blr_optimization || !Core::IsCPUThread())
     return false;
 
-  WARN_LOG(POWERPC, "BLR cache disabled due to excessive BL in the emulated program.");
+  WARN_LOG_FMT(POWERPC, "BLR cache disabled due to excessive BL in the emulated program.");
+
   m_enable_blr_optimization = false;
 #ifndef _WIN32
   // Windows does this automatically.
@@ -248,7 +248,7 @@ bool Jit64::BackPatch(u32 emAddress, SContext* ctx)
   auto it = m_back_patch_info.find(codePtr);
   if (it == m_back_patch_info.end())
   {
-    PanicAlert("BackPatch: no register use entry for address %p", codePtr);
+    PanicAlertFmt("BackPatch: no register use entry for address {}", fmt::ptr(codePtr));
     return false;
   }
 
@@ -281,7 +281,7 @@ bool Jit64::BackPatch(u32 emAddress, SContext* ctx)
   u8* start = info.start;
 
   // Patch the original memory operation.
-  XEmitter emitter(start);
+  XEmitter emitter(start, start + info.len);
   emitter.JMP(trampoline, true);
   // NOPs become dead code
   const u8* end = info.start + info.len;
@@ -332,10 +332,10 @@ void Jit64::Init()
 {
   EnableBlockLink();
 
-  jo.fastmem_arena = SConfig::GetInstance().bFastmem && Memory::InitFastmemArena();
+  jo.fastmem_arena = m_fastmem_enabled && Memory::InitFastmemArena();
   jo.optimizeGatherPipe = true;
   jo.accurateSinglePrecision = true;
-  UpdateMemoryOptions();
+  UpdateMemoryAndExceptionOptions();
   js.fastmemLoadStore = nullptr;
   js.compilerPC = 0;
 
@@ -351,11 +351,11 @@ void Jit64::Init()
   AddChildCodeSpace(&trampolines, trampolines_size);
   AddChildCodeSpace(&m_far_code, farcode_size);
   m_const_pool.Init(AllocChildCodeSpace(constpool_size), constpool_size);
+  ResetCodePtr();
 
   // BLR optimization has the same consequences as block linking, as well as
   // depending on the fault handler to be safe in the event of excessive BL.
-  m_enable_blr_optimization = jo.enableBlocklink && SConfig::GetInstance().bFastmem &&
-                              !SConfig::GetInstance().bEnableDebugging;
+  m_enable_blr_optimization = jo.enableBlocklink && m_fastmem_enabled && !m_enable_debugging;
   m_cleanup_after_stackfault = false;
 
   m_stack = nullptr;
@@ -375,17 +375,30 @@ void Jit64::Init()
   code_block.m_gpa = &js.gpa;
   code_block.m_fpa = &js.fpa;
   EnableOptimization();
+
+  ResetFreeMemoryRanges();
 }
 
 void Jit64::ClearCache()
 {
   blocks.Clear();
+  blocks.ClearRangesToFree();
   trampolines.ClearCodeSpace();
   m_far_code.ClearCodeSpace();
   m_const_pool.Clear();
   ClearCodeSpace();
   Clear();
-  UpdateMemoryOptions();
+  UpdateMemoryAndExceptionOptions();
+  ResetFreeMemoryRanges();
+}
+
+void Jit64::ResetFreeMemoryRanges()
+{
+  // Set the entire near and far code regions as unused.
+  m_free_ranges_near.clear();
+  m_free_ranges_near.insert(region, region + region_size);
+  m_free_ranges_far.clear();
+  m_free_ranges_far.insert(m_far_code.GetWritableCodePtr(), m_far_code.GetWritableCodeEnd());
 }
 
 void Jit64::Shutdown()
@@ -404,15 +417,23 @@ void Jit64::FallBackToInterpreter(UGeckoInstruction inst)
 {
   gpr.Flush();
   fpr.Flush();
+
   if (js.op->opinfo->flags & FL_ENDBLOCK)
   {
     MOV(32, PPCSTATE(pc), Imm32(js.compilerPC));
     MOV(32, PPCSTATE(npc), Imm32(js.compilerPC + 4));
   }
+
   Interpreter::Instruction instr = PPCTables::GetInterpreterOp(inst);
   ABI_PushRegistersAndAdjustStack({}, 0);
   ABI_CallFunctionC(instr, inst.hex);
   ABI_PopRegistersAndAdjustStack({}, 0);
+
+  // If the instruction wrote to any registers which were marked as discarded,
+  // we must mark them as no longer discarded
+  gpr.Reset(js.op->regsOut);
+  fpr.Reset(js.op->GetFregsOut());
+
   if (js.op->opinfo->flags & FL_ENDBLOCK)
   {
     if (js.isLastInstruction)
@@ -431,14 +452,32 @@ void Jit64::FallBackToInterpreter(UGeckoInstruction inst)
       SetJumpTarget(c);
     }
   }
+  else if (ShouldHandleFPExceptionForInstruction(js.op))
+  {
+    TEST(32, PPCSTATE(Exceptions), Imm32(EXCEPTION_PROGRAM));
+    FixupBranch exception = J_CC(CC_NZ, true);
+
+    SwitchToFarCode();
+    SetJumpTarget(exception);
+
+    RCForkGuard gpr_guard = gpr.Fork();
+    RCForkGuard fpr_guard = fpr.Fork();
+
+    gpr.Flush();
+    fpr.Flush();
+
+    MOV(32, PPCSTATE(pc), Imm32(js.op->address));
+    WriteExceptionExit();
+    SwitchToNearCode();
+  }
 }
 
-void Jit64::HLEFunction(UGeckoInstruction _inst)
+void Jit64::HLEFunction(u32 hook_index)
 {
   gpr.Flush();
   fpr.Flush();
   ABI_PushRegistersAndAdjustStack({}, 0);
-  ABI_CallFunctionCC(HLE::Execute, js.compilerPC, _inst.hex);
+  ABI_CallFunctionCC(HLE::Execute, js.compilerPC, hook_index);
   ABI_PopRegistersAndAdjustStack({}, 0);
 }
 
@@ -459,7 +498,7 @@ static void ImHere()
     if (!f)
       f.Open("log64.txt", "w");
 
-    fprintf(f.GetHandle(), "%08x\n", PC);
+    f.WriteString(fmt::format("{0:08x}\n", PC));
   }
   if (been_here.find(PC) != been_here.end())
   {
@@ -467,7 +506,7 @@ static void ImHere()
     if ((been_here.find(PC)->second) & 1023)
       return;
   }
-  INFO_LOG(DYNA_REC, "I'm here - PC = %08x , LR = %08x", PC, LR);
+  INFO_LOG_FMT(DYNA_REC, "I'm here - PC = {:08x} , LR = {:08x}", PC, LR);
   been_here[PC] = 1;
 }
 
@@ -563,8 +602,8 @@ void Jit64::JustWriteExit(u32 destination, bool bl, u32 after)
   MOV(32, PPCSTATE(pc), Imm32(destination));
 
   // Do not skip breakpoint check if debugging.
-  const u8* dispatcher = SConfig::GetInstance().bEnableDebugging ? asm_routines.dispatcher :
-                                                                   asm_routines.dispatcher_no_check;
+  const u8* dispatcher =
+      m_enable_debugging ? asm_routines.dispatcher : asm_routines.dispatcher_no_check;
 
   // Perform downcount flag check, followed by the requested exit
   if (bl)
@@ -714,12 +753,18 @@ void Jit64::Trace()
   }
 #endif
 
-  DEBUG_LOG(DYNA_REC, "JIT64 PC: %08x SRR0: %08x SRR1: %08x FPSCR: %08x MSR: %08x LR: %08x %s %s",
-            PC, SRR0, SRR1, FPSCR.Hex, MSR.Hex, PowerPC::ppcState.spr[8], regs.c_str(),
-            fregs.c_str());
+  DEBUG_LOG_FMT(DYNA_REC,
+                "JIT64 PC: {:08x} SRR0: {:08x} SRR1: {:08x} FPSCR: {:08x} "
+                "MSR: {:08x} LR: {:08x} {} {}",
+                PC, SRR0, SRR1, FPSCR.Hex, MSR.Hex, PowerPC::ppcState.spr[8], regs, fregs);
 }
 
 void Jit64::Jit(u32 em_address)
+{
+  Jit(em_address, true);
+}
+
+void Jit64::Jit(u32 em_address, bool clear_cache_and_retry_on_failure)
 {
   if (m_cleanup_after_stackfault)
   {
@@ -731,21 +776,26 @@ void Jit64::Jit(u32 em_address)
 #endif
   }
 
-  if (IsAlmostFull() || m_far_code.IsAlmostFull() || trampolines.IsAlmostFull() ||
-      SConfig::GetInstance().bJITNoBlockCache)
+  if (trampolines.IsAlmostFull() || SConfig::GetInstance().bJITNoBlockCache)
   {
     if (!SConfig::GetInstance().bJITNoBlockCache)
     {
-      const auto reason =
-          IsAlmostFull() ? "main" : m_far_code.IsAlmostFull() ? "far" : "trampoline";
-      WARN_LOG(POWERPC, "flushing %s code cache, please report if this happens a lot", reason);
+      WARN_LOG_FMT(POWERPC, "flushing trampoline code cache, please report if this happens a lot");
     }
     ClearCache();
   }
 
+  // Check if any code blocks have been freed in the block cache and transfer this information to
+  // the local rangesets to allow overwriting them with new code.
+  for (auto range : blocks.GetRangesToFreeNear())
+    m_free_ranges_near.insert(range.first, range.second);
+  for (auto range : blocks.GetRangesToFreeFar())
+    m_free_ranges_far.insert(range.first, range.second);
+  blocks.ClearRangesToFree();
+
   std::size_t block_size = m_code_buffer.size();
 
-  if (SConfig::GetInstance().bEnableDebugging)
+  if (m_enable_debugging)
   {
     // We can link blocks as long as we are not single stepping and there are no breakpoints here
     EnableBlockLink();
@@ -781,16 +831,80 @@ void Jit64::Jit(u32 em_address)
     NPC = nextPC;
     PowerPC::ppcState.Exceptions |= EXCEPTION_ISI;
     PowerPC::CheckExceptions();
-    WARN_LOG(POWERPC, "ISI exception at 0x%08x", nextPC);
+    WARN_LOG_FMT(POWERPC, "ISI exception at {:#010x}", nextPC);
     return;
   }
 
-  JitBlock* b = blocks.AllocateBlock(em_address);
-  DoJit(em_address, b, nextPC);
-  blocks.FinalizeBlock(*b, jo.enableBlocklink, code_block.m_physical_addresses);
+  if (SetEmitterStateToFreeCodeRegion())
+  {
+    u8* near_start = GetWritableCodePtr();
+    u8* far_start = m_far_code.GetWritableCodePtr();
+
+    JitBlock* b = blocks.AllocateBlock(em_address);
+    if (DoJit(em_address, b, nextPC))
+    {
+      // Code generation succeeded.
+
+      // Mark the memory regions that this code block uses as used in the local rangesets.
+      u8* near_end = GetWritableCodePtr();
+      if (near_start != near_end)
+        m_free_ranges_near.erase(near_start, near_end);
+      u8* far_end = m_far_code.GetWritableCodePtr();
+      if (far_start != far_end)
+        m_free_ranges_far.erase(far_start, far_end);
+
+      // Store the used memory regions in the block so we know what to mark as unused when the
+      // block gets invalidated.
+      b->near_begin = near_start;
+      b->near_end = near_end;
+      b->far_begin = far_start;
+      b->far_end = far_end;
+
+      blocks.FinalizeBlock(*b, jo.enableBlocklink, code_block.m_physical_addresses);
+      return;
+    }
+  }
+
+  if (clear_cache_and_retry_on_failure)
+  {
+    // Code generation failed due to not enough free space in either the near or far code regions.
+    // Clear the entire JIT cache and retry.
+    WARN_LOG_FMT(POWERPC, "flushing code caches, please report if this happens a lot");
+    ClearCache();
+    Jit(em_address, false);
+    return;
+  }
+
+  PanicAlertFmtT(
+      "JIT failed to find code space after a cache clear. This should never happen. Please "
+      "report this incident on the bug tracker. Dolphin will now exit.");
+  std::exit(-1);
 }
 
-u8* Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+bool Jit64::SetEmitterStateToFreeCodeRegion()
+{
+  // Find the largest free memory blocks and set code emitters to point at them.
+  // If we can't find a free block return false instead, which will trigger a JIT cache clear.
+  const auto free_near = m_free_ranges_near.by_size_begin();
+  if (free_near == m_free_ranges_near.by_size_end())
+  {
+    WARN_LOG_FMT(POWERPC, "Failed to find free memory region in near code region.");
+    return false;
+  }
+  SetCodePtr(free_near.from(), free_near.to());
+
+  const auto free_far = m_free_ranges_far.by_size_begin();
+  if (free_far == m_free_ranges_far.by_size_end())
+  {
+    WARN_LOG_FMT(POWERPC, "Failed to find free memory region in far code region.");
+    return false;
+  }
+  m_far_code.SetCodePtr(free_far.from(), free_far.to());
+
+  return true;
+}
+
+bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
 {
   js.firstFPInstructionFound = false;
   js.isLastInstruction = false;
@@ -836,8 +950,7 @@ u8* Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
 
   js.downcountAmount = 0;
   js.skipInstructions = 0;
-  js.carryFlagSet = false;
-  js.carryFlagInverted = false;
+  js.carryFlag = CarryFlag::InPPCState;
   js.constantGqr.clear();
 
   // Assume that GQR values don't change often at runtime. Many paired-heavy games use largely float
@@ -885,6 +998,7 @@ u8* Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
 
     js.compilerPC = op.address;
     js.op = &op;
+    js.fpr_is_store_safe = op.fprIsStoreSafeBeforeInst;
     js.instructionNumber = i;
     js.instructionsLeft = (code_block.m_num_instructions - 1) - i;
     const GekkoOPInfo* opinfo = op.opinfo;
@@ -892,7 +1006,7 @@ u8* Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
     js.fastmemLoadStore = nullptr;
     js.fixupExceptionHandler = false;
 
-    if (!SConfig::GetInstance().bEnableDebugging)
+    if (!m_enable_debugging)
       js.downcountAmount += PatchEngine::GetSpeedhackCycles(js.compilerPC);
 
     if (i == (code_block.m_num_instructions - 1))
@@ -904,7 +1018,8 @@ u8* Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
     bool gatherPipeIntCheck = js.fifoWriteAddresses.find(op.address) != js.fifoWriteAddresses.end();
 
     // Gather pipe writes using an immediate address are explicitly tracked.
-    if (jo.optimizeGatherPipe && (js.fifoBytesSinceCheck >= 32 || js.mustCheckFifo))
+    if (jo.optimizeGatherPipe &&
+        (js.fifoBytesSinceCheck >= GPFifo::GATHER_PIPE_SIZE || js.mustCheckFifo))
     {
       js.fifoBytesSinceCheck = 0;
       js.mustCheckFifo = false;
@@ -979,8 +1094,7 @@ u8* Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
         js.firstFPInstructionFound = true;
       }
 
-      if (SConfig::GetInstance().bEnableDebugging && breakpoints.IsAddressBreakPoint(op.address) &&
-          !CPU::IsStepping())
+      if (m_enable_debugging && breakpoints.IsAddressBreakPoint(op.address) && !CPU::IsStepping())
       {
         // Turn off block linking if there are breakpoints so that the Step Over command does not
         // link this block.
@@ -1001,7 +1115,7 @@ u8* Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
         SetJumpTarget(noBreakpoint);
       }
 
-      if (SConfig::GetInstance().bJITRegisterCacheOff)
+      if (bJITRegisterCacheOff)
       {
         gpr.Flush();
         fpr.Flush();
@@ -1015,11 +1129,13 @@ u8* Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
         // output, which needs to be bound in the actual instruction compilation.
         // TODO: make this smarter in the case that we're actually register-starved, i.e.
         // prioritize the more important registers.
-        gpr.PreloadRegisters(op.regsIn & op.gprInReg);
-        fpr.PreloadRegisters(op.fregsIn & op.fprInXmm);
+        gpr.PreloadRegisters(op.regsIn & op.gprInUse & ~op.gprDiscardable);
+        fpr.PreloadRegisters(op.fregsIn & op.fprInXmm & ~op.fprDiscardable);
       }
 
       CompileInstruction(op);
+
+      js.fpr_is_store_safe = op.fprIsStoreSafeAfterInst;
 
       if (jo.memcheck && (opinfo->flags & FL_LOADSTORE))
       {
@@ -1027,7 +1143,7 @@ u8* Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
         // it.
         FixupBranch memException;
         ASSERT_MSG(DYNA_REC, !(js.fastmemLoadStore && js.fixupExceptionHandler),
-                   "Fastmem loadstores shouldn't have exception handler fixups (PC=%x)!",
+                   "Fastmem loadstores shouldn't have exception handler fixups (PC={:x})!",
                    op.address);
         if (!js.fastmemLoadStore && !js.fixupExceptionHandler)
         {
@@ -1062,7 +1178,12 @@ u8* Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
       gpr.Commit();
       fpr.Commit();
 
-      // If we have a register that will never be used again, flush it.
+      // If we have a register that will never be used again, discard or flush it.
+      if (!bJITRegisterCacheOff)
+      {
+        gpr.Discard(op.gprDiscardable);
+        fpr.Discard(op.fprDiscardable);
+      }
       gpr.Flush(~op.gprInUse);
       fpr.Flush(~op.fprInUse);
 
@@ -1076,8 +1197,8 @@ u8* Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
 #if defined(_DEBUG) || defined(DEBUGFAST)
     if (!gpr.SanityCheck() || !fpr.SanityCheck())
     {
-      std::string ppc_inst = Common::GekkoDisassembler::Disassemble(op.inst.hex, em_address);
-      NOTICE_LOG(DYNA_REC, "Unflushed register: %s", ppc_inst.c_str());
+      const std::string ppc_inst = Common::GekkoDisassembler::Disassemble(op.inst.hex, em_address);
+      NOTICE_LOG_FMT(DYNA_REC, "Unflushed register: {}", ppc_inst);
     }
 #endif
     i += js.skipInstructions;
@@ -1091,6 +1212,16 @@ u8* Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
     WriteExit(nextPC);
   }
 
+  if (HasWriteFailed() || m_far_code.HasWriteFailed())
+  {
+    if (HasWriteFailed())
+      WARN_LOG_FMT(POWERPC, "JIT ran out of space in near code region during code generation.");
+    if (m_far_code.HasWriteFailed())
+      WARN_LOG_FMT(POWERPC, "JIT ran out of space in far code region during code generation.");
+
+    return false;
+  }
+
   b->codeSize = (u32)(GetCodePtr() - start);
   b->originalSize = code_block.m_num_instructions;
 
@@ -1098,7 +1229,7 @@ u8* Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
   LogGeneratedX86(code_block.m_num_instructions, m_code_buffer, start, b);
 #endif
 
-  return start;
+  return true;
 }
 
 BitSet8 Jit64::ComputeStaticGQRs(const PPCAnalyst::CodeBlock& cb) const
@@ -1165,8 +1296,8 @@ void Jit64::IntializeSpeculativeConstants()
 
 bool Jit64::HandleFunctionHooking(u32 address)
 {
-  return HLE::ReplaceFunctionIfPossible(address, [&](u32 function, HLE::HookType type) {
-    HLEFunction(function);
+  return HLE::ReplaceFunctionIfPossible(address, [&](u32 hook_index, HLE::HookType type) {
+    HLEFunction(hook_index);
 
     if (type != HLE::HookType::Replace)
       return false;
@@ -1185,7 +1316,7 @@ void LogGeneratedX86(size_t size, const PPCAnalyst::CodeBuffer& code_buffer, con
   {
     const PPCAnalyst::CodeOp& op = code_buffer[i];
     const std::string disasm = Common::GekkoDisassembler::Disassemble(op.inst.hex, op.address);
-    DEBUG_LOG(DYNA_REC, "IR_X86 PPC: %08x %s\n", op.address, disasm.c_str());
+    DEBUG_LOG_FMT(DYNA_REC, "IR_X86 PPC: {:08x} {}\n", op.address, disasm);
   }
 
   disassembler x64disasm;
@@ -1198,7 +1329,7 @@ void LogGeneratedX86(size_t size, const PPCAnalyst::CodeBuffer& code_buffer, con
   {
     char sptr[1000] = "";
     disasmPtr += x64disasm.disasm64(disasmPtr, disasmPtr, reinterpret_cast<u8*>(disasmPtr), sptr);
-    DEBUG_LOG(DYNA_REC, "IR_X86 x86: %s", sptr);
+    DEBUG_LOG_FMT(DYNA_REC, "IR_X86 x86: {}", sptr);
   }
 
   if (b->codeSize <= 250)
@@ -1211,6 +1342,6 @@ void LogGeneratedX86(size_t size, const PPCAnalyst::CodeBuffer& code_buffer, con
       ss.fill('0');
       ss << static_cast<u32>(*(normalEntry + i));
     }
-    DEBUG_LOG(DYNA_REC, "IR_X86 bin: %s\n\n\n", ss.str().c_str());
+    DEBUG_LOG_FMT(DYNA_REC, "IR_X86 bin: {}\n\n\n", ss.str());
   }
 }

@@ -1,6 +1,5 @@
 // Copyright 2010 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "InputCommon/ControllerEmu/ControllerEmu.h"
 
@@ -19,6 +18,8 @@
 
 namespace ControllerEmu
 {
+// This should theoretically be per EmulatedController instance,
+// though no EmulatedController usually run in parallel, so it makes little difference
 static std::recursive_mutex s_get_state_mutex;
 
 std::string EmulatedController::GetDisplayName() const
@@ -44,6 +45,8 @@ void EmulatedController::UpdateReferences(const ControllerInterface& devi)
   ciface::ExpressionParser::ControlEnvironment env(devi, GetDefaultDevice(), m_expression_vars);
 
   UpdateReferences(env);
+
+  env.CleanUnusedVariables();
 }
 
 void EmulatedController::UpdateReferences(ciface::ExpressionParser::ControlEnvironment& env)
@@ -75,7 +78,28 @@ void EmulatedController::UpdateSingleControlReference(const ControllerInterface&
                                                       ControlReference* ref)
 {
   ciface::ExpressionParser::ControlEnvironment env(devi, GetDefaultDevice(), m_expression_vars);
+
+  const auto lock = GetStateLock();
   ref->UpdateReference(env);
+
+  env.CleanUnusedVariables();
+}
+
+const ciface::ExpressionParser::ControlEnvironment::VariableContainer&
+EmulatedController::GetExpressionVariables() const
+{
+  return m_expression_vars;
+}
+
+void EmulatedController::ResetExpressionVariables()
+{
+  for (auto& var : m_expression_vars)
+  {
+    if (var.second)
+    {
+      *var.second = 0;
+    }
+  }
 }
 
 bool EmulatedController::IsDefaultDeviceConnected() const

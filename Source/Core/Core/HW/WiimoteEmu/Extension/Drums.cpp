@@ -1,12 +1,11 @@
 // Copyright 2010 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/HW/WiimoteEmu/Extension/Drums.h"
 
-#include <cassert>
 #include <type_traits>
 
+#include "Common/Assert.h"
 #include "Common/BitUtils.h"
 #include "Common/Common.h"
 #include "Common/CommonTypes.h"
@@ -165,17 +164,6 @@ void Drums::Update()
   Common::BitCastPtr<DataFormat>(&m_reg.controller_data) = drum_data;
 }
 
-bool Drums::IsButtonPressed() const
-{
-  u8 buttons = 0;
-  m_buttons->GetState(&buttons, drum_button_bitmasks.data());
-
-  u8 pads = 0;
-  m_pads->GetState(&pads, drum_pad_bitmasks.data());
-
-  return buttons != 0 || pads != 0;
-}
-
 void Drums::Reset()
 {
   EncryptedExtension::Reset();
@@ -210,7 +198,7 @@ ControllerEmu::ControlGroup* Drums::GetGroup(DrumsGroup group)
   case DrumsGroup::Stick:
     return m_stick;
   default:
-    assert(false);
+    ASSERT(false);
     return nullptr;
   }
 }

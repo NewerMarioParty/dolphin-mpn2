@@ -1,22 +1,22 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
 package org.dolphinemu.dolphinemu.adapters;
 
 import android.content.Context;
 import android.graphics.Rect;
-
-import androidx.annotation.NonNull;
-import androidx.appcompat.app.AlertDialog;
-import androidx.fragment.app.FragmentActivity;
-import androidx.recyclerview.widget.RecyclerView;
-
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+
+import androidx.annotation.NonNull;
+import androidx.fragment.app.FragmentActivity;
+import androidx.recyclerview.widget.RecyclerView;
 
 import org.dolphinemu.dolphinemu.R;
 import org.dolphinemu.dolphinemu.activities.EmulationActivity;
 import org.dolphinemu.dolphinemu.dialogs.GamePropertiesDialog;
 import org.dolphinemu.dolphinemu.model.GameFile;
-import org.dolphinemu.dolphinemu.services.GameFileCacheService;
+import org.dolphinemu.dolphinemu.services.GameFileCacheManager;
 import org.dolphinemu.dolphinemu.utils.PicassoUtils;
 import org.dolphinemu.dolphinemu.viewholders.GameViewHolder;
 
@@ -76,7 +76,7 @@ public final class GameAdapter extends RecyclerView.Adapter<GameViewHolder> impl
 
     holder.textGameTitle.setText(gameFile.getTitle());
 
-    if (GameFileCacheService.findSecondDisc(gameFile) != null)
+    if (GameFileCacheManager.findSecondDisc(gameFile) != null)
     {
       holder.textGameCaption
               .setText(context.getString(R.string.disc_number, gameFile.getDiscNumber() + 1));
@@ -122,6 +122,14 @@ public final class GameAdapter extends RecyclerView.Adapter<GameViewHolder> impl
   }
 
   /**
+   * Re-fetches game metadata from the game file cache.
+   */
+  public void refetchMetadata()
+  {
+    notifyItemRangeChanged(0, getItemCount());
+  }
+
+  /**
    * Launches the game that was clicked on.
    *
    * @param view The card representing the game the user wants to play.
@@ -131,7 +139,8 @@ public final class GameAdapter extends RecyclerView.Adapter<GameViewHolder> impl
   {
     GameViewHolder holder = (GameViewHolder) view.getTag();
 
-    EmulationActivity.launch((FragmentActivity) view.getContext(), holder.gameFile);
+    String[] paths = GameFileCacheManager.findSecondDiscAndGetPaths(holder.gameFile);
+    EmulationActivity.launch((FragmentActivity) view.getContext(), paths, false);
   }
 
   /**
@@ -147,21 +156,10 @@ public final class GameAdapter extends RecyclerView.Adapter<GameViewHolder> impl
     GameViewHolder holder = (GameViewHolder) view.getTag();
     String gameId = holder.gameFile.getGameId();
 
-    if (gameId.isEmpty())
-    {
-      AlertDialog.Builder builder = new AlertDialog.Builder(activity, R.style.DolphinDialogBase);
-      builder.setTitle("Game Settings");
-      builder.setMessage("Files without game IDs don't support game-specific settings.");
-
-      builder.show();
-      return true;
-    }
-
-    GamePropertiesDialog fragment =
-            GamePropertiesDialog
-                    .newInstance(holder.gameFile.getPath(), gameId, holder.gameFile.getPlatform());
+    GamePropertiesDialog fragment = GamePropertiesDialog.newInstance(holder.gameFile);
     ((FragmentActivity) view.getContext()).getSupportFragmentManager().beginTransaction()
             .add(fragment, GamePropertiesDialog.TAG).commit();
+
     return true;
   }
 

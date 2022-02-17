@@ -1,6 +1,5 @@
 // Copyright 2010 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "VideoCommon/VertexManagerBase.h"
 
@@ -11,11 +10,12 @@
 #include "Common/BitSet.h"
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
+#include "Common/EnumMap.h"
 #include "Common/Logging/Log.h"
 #include "Common/MathUtil.h"
 
-#include "Core/Analytics.h"
 #include "Core/ConfigManager.h"
+#include "Core/DolphinAnalytics.h"
 
 #include "VideoCommon/BPMemory.h"
 #include "VideoCommon/BoundingBox.h"
@@ -28,7 +28,6 @@
 #include "VideoCommon/PerfQueryBase.h"
 #include "VideoCommon/PixelShaderManager.h"
 #include "VideoCommon/RenderBase.h"
-#include "VideoCommon/SamplerCommon.h"
 #include "VideoCommon/Statistics.h"
 #include "VideoCommon/TextureCacheBase.h"
 #include "VideoCommon/VertexLoaderManager.h"
@@ -40,8 +39,10 @@
 
 std::unique_ptr<VertexManagerBase> g_vertex_manager;
 
+using OpcodeDecoder::Primitive;
+
 // GX primitive -> RenderState primitive, no primitive restart
-constexpr std::array<PrimitiveType, 8> primitive_from_gx{{
+constexpr Common::EnumMap<PrimitiveType, Primitive::GX_DRAW_POINTS> primitive_from_gx{
     PrimitiveType::Triangles,  // GX_DRAW_QUADS
     PrimitiveType::Triangles,  // GX_DRAW_QUADS_2
     PrimitiveType::Triangles,  // GX_DRAW_TRIANGLES
@@ -50,10 +51,10 @@ constexpr std::array<PrimitiveType, 8> primitive_from_gx{{
     PrimitiveType::Lines,      // GX_DRAW_LINES
     PrimitiveType::Lines,      // GX_DRAW_LINE_STRIP
     PrimitiveType::Points,     // GX_DRAW_POINTS
-}};
+};
 
 // GX primitive -> RenderState primitive, using primitive restart
-constexpr std::array<PrimitiveType, 8> primitive_from_gx_pr{{
+constexpr Common::EnumMap<PrimitiveType, Primitive::GX_DRAW_POINTS> primitive_from_gx_pr{
     PrimitiveType::TriangleStrip,  // GX_DRAW_QUADS
     PrimitiveType::TriangleStrip,  // GX_DRAW_QUADS_2
     PrimitiveType::TriangleStrip,  // GX_DRAW_TRIANGLES
@@ -62,7 +63,7 @@ constexpr std::array<PrimitiveType, 8> primitive_from_gx_pr{{
     PrimitiveType::Lines,          // GX_DRAW_LINES
     PrimitiveType::Lines,          // GX_DRAW_LINE_STRIP
     PrimitiveType::Points,         // GX_DRAW_POINTS
-}};
+};
 
 // Due to the BT.601 standard which the GameCube is based on being a compromise
 // between PAL and NTSC, neither standard gets square pixels. They are each off
@@ -109,13 +110,13 @@ u32 VertexManagerBase::GetRemainingSize() const
   return static_cast<u32>(m_end_buffer_pointer - m_cur_buffer_pointer);
 }
 
-void VertexManagerBase::AddIndices(int primitive, u32 num_vertices)
+void VertexManagerBase::AddIndices(OpcodeDecoder::Primitive primitive, u32 num_vertices)
 {
   m_index_generator.AddIndices(primitive, num_vertices);
 }
 
-DataReader VertexManagerBase::PrepareForAdditionalData(int primitive, u32 count, u32 stride,
-                                                       bool cullall)
+DataReader VertexManagerBase::PrepareForAdditionalData(OpcodeDecoder::Primitive primitive,
+                                                       u32 count, u32 stride, bool cullall)
 {
   // Flush all EFB pokes. Since the buffer is shared, we can't draw pokes+primitives concurrently.
   g_framebuffer_manager->FlushEFBPokes();
@@ -144,13 +145,19 @@ DataReader VertexManagerBase::PrepareForAdditionalData(int primitive, u32 count,
     Flush();
 
     if (count > m_index_generator.GetRemainingIndices())
-      ERROR_LOG(VIDEO, "Too little remaining index values. Use 32-bit or reset them on flush.");
+    {
+      ERROR_LOG_FMT(VIDEO, "Too little remaining index values. Use 32-bit or reset them on flush.");
+    }
     if (count > GetRemainingIndices(primitive))
-      ERROR_LOG(VIDEO, "VertexManager: Buffer not large enough for all indices! "
-                       "Increase MAXIBUFFERSIZE or we need primitive breaking after all.");
+    {
+      ERROR_LOG_FMT(VIDEO, "VertexManager: Buffer not large enough for all indices! "
+                           "Increase MAXIBUFFERSIZE or we need primitive breaking after all.");
+    }
     if (needed_vertex_bytes > GetRemainingSize())
-      ERROR_LOG(VIDEO, "VertexManager: Buffer not large enough for all vertices! "
-                       "Increase MAXVBUFFERSIZE or we need primitive breaking after all.");
+    {
+      ERROR_LOG_FMT(VIDEO, "VertexManager: Buffer not large enough for all vertices! "
+                           "Increase MAXVBUFFERSIZE or we need primitive breaking after all.");
+    }
   }
 
   m_cull_all = cullall;
@@ -181,7 +188,7 @@ void VertexManagerBase::FlushData(u32 count, u32 stride)
   m_cur_buffer_pointer += count * stride;
 }
 
-u32 VertexManagerBase::GetRemainingIndices(int primitive) const
+u32 VertexManagerBase::GetRemainingIndices(OpcodeDecoder::Primitive primitive) const
 {
   const u32 index_len = MAXIBUFFERSIZE - m_index_generator.GetIndexLen();
 
@@ -189,22 +196,22 @@ u32 VertexManagerBase::GetRemainingIndices(int primitive) const
   {
     switch (primitive)
     {
-    case OpcodeDecoder::GX_DRAW_QUADS:
-    case OpcodeDecoder::GX_DRAW_QUADS_2:
+    case Primitive::GX_DRAW_QUADS:
+    case Primitive::GX_DRAW_QUADS_2:
       return index_len / 5 * 4;
-    case OpcodeDecoder::GX_DRAW_TRIANGLES:
+    case Primitive::GX_DRAW_TRIANGLES:
       return index_len / 4 * 3;
-    case OpcodeDecoder::GX_DRAW_TRIANGLE_STRIP:
+    case Primitive::GX_DRAW_TRIANGLE_STRIP:
       return index_len / 1 - 1;
-    case OpcodeDecoder::GX_DRAW_TRIANGLE_FAN:
+    case Primitive::GX_DRAW_TRIANGLE_FAN:
       return index_len / 6 * 4 + 1;
 
-    case OpcodeDecoder::GX_DRAW_LINES:
+    case Primitive::GX_DRAW_LINES:
       return index_len;
-    case OpcodeDecoder::GX_DRAW_LINE_STRIP:
+    case Primitive::GX_DRAW_LINE_STRIP:
       return index_len / 2 + 1;
 
-    case OpcodeDecoder::GX_DRAW_POINTS:
+    case Primitive::GX_DRAW_POINTS:
       return index_len;
 
     default:
@@ -215,22 +222,22 @@ u32 VertexManagerBase::GetRemainingIndices(int primitive) const
   {
     switch (primitive)
     {
-    case OpcodeDecoder::GX_DRAW_QUADS:
-    case OpcodeDecoder::GX_DRAW_QUADS_2:
+    case Primitive::GX_DRAW_QUADS:
+    case Primitive::GX_DRAW_QUADS_2:
       return index_len / 6 * 4;
-    case OpcodeDecoder::GX_DRAW_TRIANGLES:
+    case Primitive::GX_DRAW_TRIANGLES:
       return index_len;
-    case OpcodeDecoder::GX_DRAW_TRIANGLE_STRIP:
+    case Primitive::GX_DRAW_TRIANGLE_STRIP:
       return index_len / 3 + 2;
-    case OpcodeDecoder::GX_DRAW_TRIANGLE_FAN:
+    case Primitive::GX_DRAW_TRIANGLE_FAN:
       return index_len / 3 + 2;
 
-    case OpcodeDecoder::GX_DRAW_LINES:
+    case Primitive::GX_DRAW_LINES:
       return index_len;
-    case OpcodeDecoder::GX_DRAW_LINE_STRIP:
+    case Primitive::GX_DRAW_LINE_STRIP:
       return index_len / 2 + 1;
 
-    case OpcodeDecoder::GX_DRAW_POINTS:
+    case Primitive::GX_DRAW_POINTS:
       return index_len;
 
     default:
@@ -264,7 +271,7 @@ void VertexManagerBase::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 nu
 void VertexManagerBase::DrawCurrentBatch(u32 base_index, u32 num_indices, u32 base_vertex)
 {
   // If bounding box is enabled, we need to flush any changes first, then invalidate what we have.
-  if (BoundingBox::IsEnabled() && g_ActiveConfig.bBBoxEnable &&
+  if (g_renderer->IsBBoxEnabled() && g_ActiveConfig.bBBoxEnable &&
       g_ActiveConfig.backend_info.bSupportsBBox)
   {
     g_renderer->BBoxFlush();
@@ -345,7 +352,7 @@ void VertexManagerBase::LoadTextures()
   for (unsigned int i : usedtextures)
     g_texture_cache->Load(i);
 
-  g_texture_cache->BindTextures();
+  g_texture_cache->BindTextures(usedtextures);
 }
 
 void VertexManagerBase::Flush()
@@ -358,11 +365,12 @@ void VertexManagerBase::Flush()
   if (xfmem.numTexGen.numTexGens != bpmem.genMode.numtexgens ||
       xfmem.numChan.numColorChans != bpmem.genMode.numcolchans)
   {
-    ERROR_LOG(VIDEO,
-              "Mismatched configuration between XF and BP stages - %u/%u texgens, %u/%u colors. "
-              "Skipping draw. Please report on the issue tracker.",
-              xfmem.numTexGen.numTexGens, bpmem.genMode.numtexgens.Value(),
-              xfmem.numChan.numColorChans, bpmem.genMode.numcolchans.Value());
+    ERROR_LOG_FMT(
+        VIDEO,
+        "Mismatched configuration between XF and BP stages - {}/{} texgens, {}/{} colors. "
+        "Skipping draw. Please report on the issue tracker.",
+        xfmem.numTexGen.numTexGens, bpmem.genMode.numtexgens.Value(), xfmem.numChan.numColorChans,
+        bpmem.genMode.numcolchans.Value());
 
     // Analytics reporting so we can discover which games have this problem, that way when we
     // eventually simulate the behavior we have test cases for it.
@@ -381,7 +389,7 @@ void VertexManagerBase::Flush()
   }
 
 #if defined(_DEBUG) || defined(DEBUGFAST)
-  PRIM_LOG("frame%d:\n texgen=%u, numchan=%u, dualtex=%u, ztex=%u, cole=%u, alpe=%u, ze=%u",
+  PRIM_LOG("frame{}:\n texgen={}, numchan={}, dualtex={}, ztex={}, cole={}, alpe={}, ze={}",
            g_ActiveConfig.iSaveTargetId, xfmem.numTexGen.numTexGens, xfmem.numChan.numColorChans,
            xfmem.dualTexTrans.enabled, bpmem.ztex2.op.Value(), bpmem.blendmode.colorupdate.Value(),
            bpmem.blendmode.alphaupdate.Value(), bpmem.zmode.updateenable.Value());
@@ -389,11 +397,11 @@ void VertexManagerBase::Flush()
   for (u32 i = 0; i < xfmem.numChan.numColorChans; ++i)
   {
     LitChannel* ch = &xfmem.color[i];
-    PRIM_LOG("colchan%u: matsrc=%u, light=0x%x, ambsrc=%u, diffunc=%u, attfunc=%u", i,
+    PRIM_LOG("colchan{}: matsrc={}, light={:#x}, ambsrc={}, diffunc={}, attfunc={}", i,
              ch->matsource.Value(), ch->GetFullLightMask(), ch->ambsource.Value(),
              ch->diffusefunc.Value(), ch->attnfunc.Value());
     ch = &xfmem.alpha[i];
-    PRIM_LOG("alpchan%u: matsrc=%u, light=0x%x, ambsrc=%u, diffunc=%u, attfunc=%u", i,
+    PRIM_LOG("alpchan{}: matsrc={}, light={:#x}, ambsrc={}, diffunc={}, attfunc={}", i,
              ch->matsource.Value(), ch->GetFullLightMask(), ch->ambsource.Value(),
              ch->diffusefunc.Value(), ch->attnfunc.Value());
   }
@@ -401,20 +409,20 @@ void VertexManagerBase::Flush()
   for (u32 i = 0; i < xfmem.numTexGen.numTexGens; ++i)
   {
     TexMtxInfo tinfo = xfmem.texMtxInfo[i];
-    if (tinfo.texgentype != XF_TEXGEN_EMBOSS_MAP)
+    if (tinfo.texgentype != TexGenType::EmbossMap)
       tinfo.hex &= 0x7ff;
-    if (tinfo.texgentype != XF_TEXGEN_REGULAR)
-      tinfo.projection = 0;
+    if (tinfo.texgentype != TexGenType::Regular)
+      tinfo.projection = TexSize::ST;
 
-    PRIM_LOG("txgen%u: proj=%u, input=%u, gentype=%u, srcrow=%u, embsrc=%u, emblght=%u, "
-             "postmtx=%u, postnorm=%u",
+    PRIM_LOG("txgen{}: proj={}, input={}, gentype={}, srcrow={}, embsrc={}, emblght={}, "
+             "postmtx={}, postnorm={}",
              i, tinfo.projection.Value(), tinfo.inputform.Value(), tinfo.texgentype.Value(),
              tinfo.sourcerow.Value(), tinfo.embosssourceshift.Value(),
              tinfo.embosslightshift.Value(), xfmem.postMtxInfo[i].index.Value(),
              xfmem.postMtxInfo[i].normalize.Value());
   }
 
-  PRIM_LOG("pixel: tev=%u, ind=%u, texgen=%u, dstalpha=%u, alphatest=0x%x",
+  PRIM_LOG("pixel: tev={}, ind={}, texgen={}, dstalpha={}, alphatest={:#x}",
            bpmem.genMode.numtevstages.Value() + 1, bpmem.genMode.numindstages.Value(),
            bpmem.genMode.numtexgens.Value(), bpmem.dstalpha.enable.Value(),
            (bpmem.alpha_test.hex >> 16) & 0xff);
@@ -423,7 +431,7 @@ void VertexManagerBase::Flush()
   // Track some stats used elsewhere by the anamorphic widescreen heuristic.
   if (!SConfig::GetInstance().bWii)
   {
-    const bool is_perspective = xfmem.projection.type == GX_PERSPECTIVE;
+    const bool is_perspective = xfmem.projection.type == ProjectionType::Perspective;
 
     auto& counts =
         is_perspective ? m_flush_statistics.perspective : m_flush_statistics.orthographic;
@@ -502,9 +510,9 @@ void VertexManagerBase::Flush()
 
   if (xfmem.numTexGen.numTexGens != bpmem.genMode.numtexgens)
   {
-    ERROR_LOG(VIDEO,
-              "xf.numtexgens (%d) does not match bp.numtexgens (%d). Error in command stream.",
-              xfmem.numTexGen.numTexGens, bpmem.genMode.numtexgens.Value());
+    ERROR_LOG_FMT(VIDEO,
+                  "xf.numtexgens ({}) does not match bp.numtexgens ({}). Error in command stream.",
+                  xfmem.numTexGen.numTexGens, bpmem.genMode.numtexgens.Value());
   }
 }
 
@@ -813,12 +821,12 @@ void VertexManagerBase::OnEndFrame()
   {
     std::ostringstream ss;
     std::for_each(m_cpu_accesses_this_frame.begin(), m_cpu_accesses_this_frame.end(), [&ss](u32 idx) { ss << idx << ","; });
-    WARN_LOG(VIDEO, "CPU EFB accesses in last frame: %s", ss.str().c_str());
+    WARN_LOG_FMT(VIDEO, "CPU EFB accesses in last frame: {}", ss.str());
   }
   {
     std::ostringstream ss;
     std::for_each(m_scheduled_command_buffer_kicks.begin(), m_scheduled_command_buffer_kicks.end(), [&ss](u32 idx) { ss << idx << ","; });
-    WARN_LOG(VIDEO, "Scheduled command buffer kicks: %s", ss.str().c_str());
+    WARN_LOG_FMT(VIDEO, "Scheduled command buffer kicks: {}", ss.str());
   }
 #endif
 

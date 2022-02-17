@@ -1,6 +1,5 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 // NOTE:
 // These functions are primarily used by the interpreter versions of the LoadStore instructions.
@@ -18,6 +17,7 @@
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
 #include "Common/MemArena.h"
+#include "Common/MsgHandler.h"
 #include "Common/Swap.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/ConfigManager.h"
@@ -33,6 +33,7 @@
 #include "Core/HW/WII_IPC.h"
 #include "Core/PowerPC/JitCommon/JitBase.h"
 #include "Core/PowerPC/PowerPC.h"
+#include "Core/System.h"
 #include "VideoCommon/CommandProcessor.h"
 #include "VideoCommon/PixelEngine.h"
 
@@ -174,6 +175,7 @@ struct PhysicalMemoryRegion
     WII_ONLY = 2,
   } flags;
   u32 shm_position;
+  bool active;
 };
 
 struct LogicalMemoryView
@@ -183,7 +185,7 @@ struct LogicalMemoryView
 };
 
 // Dolphin allocates memory to represent four regions:
-// - 32MB RAM (actually 24MB on hardware), available on Gamecube and Wii
+// - 32MB RAM (actually 24MB on hardware), available on GameCube and Wii
 // - 64MB "EXRAM", RAM only available on Wii
 // - 32MB FakeVMem, allocated in GameCube mode when MMU support is turned off.
 //   This is used to approximate the behavior of a common library which pages
@@ -222,30 +224,9 @@ struct LogicalMemoryView
 //
 // TODO: The actual size of RAM is 24MB; the other 8MB shouldn't be backed by actual memory.
 // TODO: Do we want to handle the mirrors of the GC RAM?
-static std::array<PhysicalMemoryRegion, 4> physical_regions;
+static std::array<PhysicalMemoryRegion, 4> s_physical_regions;
 
 static std::vector<LogicalMemoryView> logical_mapped_entries;
-
-static u32 GetFlags()
-{
-  bool wii = SConfig::GetInstance().bWii;
-  bool bMMU = SConfig::GetInstance().bMMU;
-  bool bFakeVMEM = false;
-#ifndef _ARCH_32
-  // If MMU is turned off in GameCube mode, turn on fake VMEM hack.
-  // The fake VMEM hack's address space is above the memory space that we
-  // allocate on 32bit targets, so disable it there.
-  bFakeVMEM = !wii && !bMMU;
-#endif
-
-  u32 flags = 0;
-  if (wii)
-    flags |= PhysicalMemoryRegion::WII_ONLY;
-  if (bFakeVMEM)
-    flags |= PhysicalMemoryRegion::FAKE_VMEM;
-
-  return flags;
-}
 
 void Init()
 {
@@ -271,35 +252,52 @@ void Init()
   s_exram_size = MathUtil::NextPowerOf2(GetExRamSizeReal());
   s_exram_mask = GetExRamSize() - 1;
 
-  physical_regions[0] = {&m_pRAM, 0x00000000, GetRamSize(), PhysicalMemoryRegion::ALWAYS};
-  physical_regions[1] = {&m_pL1Cache, 0xE0000000, GetL1CacheSize(), PhysicalMemoryRegion::ALWAYS};
-  physical_regions[2] = {&m_pFakeVMEM, 0x7E000000, GetFakeVMemSize(),
-                         PhysicalMemoryRegion::FAKE_VMEM};
-  physical_regions[3] = {&m_pEXRAM, 0x10000000, GetExRamSize(), PhysicalMemoryRegion::WII_ONLY};
+  s_physical_regions[0] = {&m_pRAM, 0x00000000, GetRamSize(), PhysicalMemoryRegion::ALWAYS, false};
+  s_physical_regions[1] = {&m_pL1Cache, 0xE0000000, GetL1CacheSize(), PhysicalMemoryRegion::ALWAYS,
+                           false};
+  s_physical_regions[2] = {&m_pFakeVMEM, 0x7E000000, GetFakeVMemSize(),
+                           PhysicalMemoryRegion::FAKE_VMEM, false};
+  s_physical_regions[3] = {&m_pEXRAM, 0x10000000, GetExRamSize(), PhysicalMemoryRegion::WII_ONLY,
+                           false};
 
-  bool wii = SConfig::GetInstance().bWii;
-  u32 flags = GetFlags();
+  const bool wii = SConfig::GetInstance().bWii;
+  const bool mmu = Core::System::GetInstance().IsMMUMode();
+
+  bool fake_vmem = false;
+#ifndef _ARCH_32
+  // If MMU is turned off in GameCube mode, turn on fake VMEM hack.
+  // The fake VMEM hack's address space is above the memory space that we
+  // allocate on 32bit targets, so disable it there.
+  fake_vmem = !wii && !mmu;
+#endif
+
   u32 mem_size = 0;
-  for (PhysicalMemoryRegion& region : physical_regions)
+  for (PhysicalMemoryRegion& region : s_physical_regions)
   {
-    if ((flags & region.flags) != region.flags)
+    if (!wii && (region.flags & PhysicalMemoryRegion::WII_ONLY))
       continue;
+    if (!fake_vmem && (region.flags & PhysicalMemoryRegion::FAKE_VMEM))
+      continue;
+
     region.shm_position = mem_size;
+    region.active = true;
     mem_size += region.size;
   }
   g_arena.GrabSHMSegment(mem_size);
 
   // Create an anonymous view of the physical memory
-  for (PhysicalMemoryRegion& region : physical_regions)
+  for (const PhysicalMemoryRegion& region : s_physical_regions)
   {
-    if ((flags & region.flags) != region.flags)
+    if (!region.active)
       continue;
 
     *region.out_pointer = (u8*)g_arena.CreateView(region.shm_position, region.size);
 
     if (!*region.out_pointer)
     {
-      PanicAlert("MemoryMap_Setup: Failed finding a memory base.");
+      PanicAlertFmt(
+          "Memory::Init(): Failed to create view for physical region at 0x{:08X} (size 0x{:08X}).",
+          region.physical_address, region.size);
       exit(0);
     }
   }
@@ -311,28 +309,38 @@ void Init()
 
   Clear();
 
-  INFO_LOG(MEMMAP, "Memory system initialized. RAM at %p", m_pRAM);
+  INFO_LOG_FMT(MEMMAP, "Memory system initialized. RAM at {}", fmt::ptr(m_pRAM));
   m_IsInitialized = true;
 }
 
 bool InitFastmemArena()
 {
-  u32 flags = GetFlags();
-  physical_base = Common::MemArena::FindMemoryBase();
+#if _ARCH_32
+  const size_t memory_size = 0x31000000;
+#else
+  const size_t memory_size = 0x400000000;
+#endif
+  physical_base = g_arena.ReserveMemoryRegion(memory_size);
 
   if (!physical_base)
-    return false;
-
-  for (PhysicalMemoryRegion& region : physical_regions)
   {
-    if ((flags & region.flags) != region.flags)
+    PanicAlertFmt("Memory::InitFastmemArena(): Failed finding a memory base.");
+    return false;
+  }
+
+  for (const PhysicalMemoryRegion& region : s_physical_regions)
+  {
+    if (!region.active)
       continue;
 
     u8* base = physical_base + region.physical_address;
-    u8* view = (u8*)g_arena.CreateView(region.shm_position, region.size, base);
+    u8* view = (u8*)g_arena.MapInMemoryRegion(region.shm_position, region.size, base);
 
     if (base != view)
     {
+      PanicAlertFmt("Memory::InitFastmemArena(): Failed to map memory region at 0x{:08X} "
+                    "(size 0x{:08X}) into physical fastmem region.",
+                    region.physical_address, region.size);
       return false;
     }
   }
@@ -352,7 +360,7 @@ void UpdateLogicalMemory(const PowerPC::BatTable& dbat_table)
 
   for (auto& entry : logical_mapped_entries)
   {
-    g_arena.ReleaseView(entry.mapped_pointer, entry.mapped_size);
+    g_arena.UnmapFromMemoryRegion(entry.mapped_pointer, entry.mapped_size);
   }
   logical_mapped_entries.clear();
   for (u32 i = 0; i < dbat_table.size(); ++i)
@@ -363,8 +371,11 @@ void UpdateLogicalMemory(const PowerPC::BatTable& dbat_table)
       // TODO: Merge adjacent mappings to make this faster.
       u32 logical_size = PowerPC::BAT_PAGE_SIZE;
       u32 translated_address = dbat_table[i] & PowerPC::BAT_RESULT_MASK;
-      for (const auto& physical_region : physical_regions)
+      for (const auto& physical_region : s_physical_regions)
       {
+        if (!physical_region.active)
+          continue;
+
         u32 mapping_address = physical_region.physical_address;
         u32 mapping_end = mapping_address + physical_region.size;
         u32 intersection_start = std::max(mapping_address, translated_address);
@@ -376,10 +387,12 @@ void UpdateLogicalMemory(const PowerPC::BatTable& dbat_table)
           u8* base = logical_base + logical_address + intersection_start - translated_address;
           u32 mapped_size = intersection_end - intersection_start;
 
-          void* mapped_pointer = g_arena.CreateView(position, mapped_size, base);
+          void* mapped_pointer = g_arena.MapInMemoryRegion(position, mapped_size, base);
           if (!mapped_pointer)
           {
-            PanicAlert("MemoryMap_Setup: Failed finding a memory base.");
+            PanicAlertFmt("Memory::UpdateLogicalMemory(): Failed to map memory region at 0x{:08X} "
+                          "(size 0x{:08X}) into logical fastmem region at 0x{:08X}.",
+                          intersection_start, mapped_size, logical_address);
             exit(0);
           }
           logical_mapped_entries.push_back({mapped_pointer, mapped_size});
@@ -408,17 +421,17 @@ void Shutdown()
   ShutdownFastmemArena();
 
   m_IsInitialized = false;
-  u32 flags = GetFlags();
-  for (PhysicalMemoryRegion& region : physical_regions)
+  for (const PhysicalMemoryRegion& region : s_physical_regions)
   {
-    if ((flags & region.flags) != region.flags)
+    if (!region.active)
       continue;
+
     g_arena.ReleaseView(*region.out_pointer, region.size);
     *region.out_pointer = nullptr;
   }
   g_arena.ReleaseSHMSegment();
   mmio_mapping.reset();
-  INFO_LOG(MEMMAP, "Memory system shut down.");
+  INFO_LOG_FMT(MEMMAP, "Memory system shut down.");
 }
 
 void ShutdownFastmemArena()
@@ -426,21 +439,22 @@ void ShutdownFastmemArena()
   if (!is_fastmem_arena_initialized)
     return;
 
-  u32 flags = GetFlags();
-  for (PhysicalMemoryRegion& region : physical_regions)
+  for (const PhysicalMemoryRegion& region : s_physical_regions)
   {
-    if ((flags & region.flags) != region.flags)
+    if (!region.active)
       continue;
 
     u8* base = physical_base + region.physical_address;
-    g_arena.ReleaseView(base, region.size);
+    g_arena.UnmapFromMemoryRegion(base, region.size);
   }
 
   for (auto& entry : logical_mapped_entries)
   {
-    g_arena.ReleaseView(entry.mapped_pointer, entry.mapped_size);
+    g_arena.UnmapFromMemoryRegion(entry.mapped_pointer, entry.mapped_size);
   }
   logical_mapped_entries.clear();
+
+  g_arena.ReleaseMemoryRegion();
 
   physical_base = nullptr;
   logical_base = nullptr;
@@ -460,16 +474,22 @@ void Clear()
     memset(m_pEXRAM, 0, GetExRamSize());
 }
 
-static inline u8* GetPointerForRange(u32 address, size_t size)
+u8* GetPointerForRange(u32 address, size_t size)
 {
   // Make sure we don't have a range spanning 2 separate banks
   if (size >= GetExRamSizeReal())
+  {
+    PanicAlertFmt("Oversized range in GetPointerForRange. {:x} bytes at {:#010x}", size, address);
     return nullptr;
+  }
 
   // Check that the beginning and end of the range are valid
   u8* pointer = GetPointer(address);
   if (!pointer || !GetPointer(address + u32(size) - 1))
+  {
+    // A panic alert has already been raised by GetPointer
     return nullptr;
+  }
 
   return pointer;
 }
@@ -482,7 +502,7 @@ void CopyFromEmu(void* data, u32 address, size_t size)
   void* pointer = GetPointerForRange(address, size);
   if (!pointer)
   {
-    PanicAlert("Invalid range in CopyFromEmu. %zx bytes from 0x%08x", size, address);
+    PanicAlertFmt("Invalid range in CopyFromEmu. {:x} bytes from {:#010x}", size, address);
     return;
   }
   memcpy(data, pointer, size);
@@ -496,7 +516,7 @@ void CopyToEmu(u32 address, const void* data, size_t size)
   void* pointer = GetPointerForRange(address, size);
   if (!pointer)
   {
-    PanicAlert("Invalid range in CopyToEmu. %zx bytes to 0x%08x", size, address);
+    PanicAlertFmt("Invalid range in CopyToEmu. {:x} bytes to {:#010x}", size, address);
     return;
   }
   memcpy(pointer, data, size);
@@ -510,7 +530,7 @@ void Memset(u32 address, u8 value, size_t size)
   void* pointer = GetPointerForRange(address, size);
   if (!pointer)
   {
-    PanicAlert("Invalid range in Memset. %zx bytes at 0x%08x", size, address);
+    PanicAlertFmt("Invalid range in Memset. {:x} bytes at {:#010x}", size, address);
     return;
   }
   memset(pointer, value, size);
@@ -547,62 +567,69 @@ u8* GetPointer(u32 address)
       return m_pEXRAM + (address & GetExRamMask());
   }
 
-  PanicAlert("Unknown Pointer 0x%08x PC 0x%08x LR 0x%08x", address, PC, LR);
-
+  PanicAlertFmt("Unknown Pointer {:#010x} PC {:#010x} LR {:#010x}", address, PC, LR);
   return nullptr;
 }
 
 u8 Read_U8(u32 address)
 {
-  return *GetPointer(address);
+  u8 value = 0;
+  CopyFromEmu(&value, address, sizeof(value));
+  return value;
 }
 
 u16 Read_U16(u32 address)
 {
-  return Common::swap16(GetPointer(address));
+  u16 value = 0;
+  CopyFromEmu(&value, address, sizeof(value));
+  return Common::swap16(value);
 }
 
 u32 Read_U32(u32 address)
 {
-  return Common::swap32(GetPointer(address));
+  u32 value = 0;
+  CopyFromEmu(&value, address, sizeof(value));
+  return Common::swap32(value);
 }
 
 u64 Read_U64(u32 address)
 {
-  return Common::swap64(GetPointer(address));
+  u64 value = 0;
+  CopyFromEmu(&value, address, sizeof(value));
+  return Common::swap64(value);
 }
 
 void Write_U8(u8 value, u32 address)
 {
-  *GetPointer(address) = value;
+  CopyToEmu(address, &value, sizeof(value));
 }
 
 void Write_U16(u16 value, u32 address)
 {
   u16 swapped_value = Common::swap16(value);
-  std::memcpy(GetPointer(address), &swapped_value, sizeof(u16));
+  CopyToEmu(address, &swapped_value, sizeof(swapped_value));
 }
 
 void Write_U32(u32 value, u32 address)
 {
   u32 swapped_value = Common::swap32(value);
-  std::memcpy(GetPointer(address), &swapped_value, sizeof(u32));
+  CopyToEmu(address, &swapped_value, sizeof(swapped_value));
 }
 
 void Write_U64(u64 value, u32 address)
 {
   u64 swapped_value = Common::swap64(value);
-  std::memcpy(GetPointer(address), &swapped_value, sizeof(u64));
+  CopyToEmu(address, &swapped_value, sizeof(swapped_value));
 }
 
 void Write_U32_Swap(u32 value, u32 address)
 {
-  std::memcpy(GetPointer(address), &value, sizeof(u32));
+  CopyToEmu(address, &value, sizeof(value));
 }
 
 void Write_U64_Swap(u64 value, u32 address)
 {
-  std::memcpy(GetPointer(address), &value, sizeof(u64));
+  CopyToEmu(address, &value, sizeof(value));
 }
 
 }  // namespace Memory

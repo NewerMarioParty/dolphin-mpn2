@@ -1,6 +1,5 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
@@ -60,15 +59,20 @@ public:
   std::optional<u64> ReadSwappedAndShifted(u64 offset, const Partition& partition) const
   {
     const std::optional<u32> temp = ReadSwapped<u32>(offset, partition);
-    return temp ? static_cast<u64>(*temp) << GetOffsetShift() : std::optional<u64>();
+    if (!temp)
+      return std::nullopt;
+    return static_cast<u64>(*temp) << GetOffsetShift();
   }
 
   virtual bool IsEncryptedAndHashed() const { return false; }
   virtual std::vector<Partition> GetPartitions() const { return {}; }
   virtual Partition GetGamePartition() const { return PARTITION_NONE; }
-  virtual std::optional<u32> GetPartitionType(const Partition& partition) const { return {}; }
+  virtual std::optional<u32> GetPartitionType(const Partition& partition) const
+  {
+    return std::nullopt;
+  }
   std::optional<u64> GetTitleID() const { return GetTitleID(GetGamePartition()); }
-  virtual std::optional<u64> GetTitleID(const Partition& partition) const { return {}; }
+  virtual std::optional<u64> GetTitleID(const Partition& partition) const { return std::nullopt; }
   virtual const IOS::ES::TicketReader& GetTicket(const Partition& partition) const
   {
     return INVALID_TICKET;
@@ -121,7 +125,7 @@ public:
   virtual bool IsNKit() const = 0;
   virtual bool SupportsIntegrityCheck() const { return false; }
   virtual bool CheckH3TableIntegrity(const Partition& partition) const { return false; }
-  virtual bool CheckBlockIntegrity(u64 block_index, const std::vector<u8>& encrypted_data,
+  virtual bool CheckBlockIntegrity(u64 block_index, const u8* encrypted_data,
                                    const Partition& partition) const
   {
     return false;
@@ -178,8 +182,11 @@ protected:
   static const std::vector<u8> INVALID_CERT_CHAIN;
 };
 
+std::unique_ptr<VolumeDisc> CreateDisc(std::unique_ptr<BlobReader> reader);
 std::unique_ptr<VolumeDisc> CreateDisc(const std::string& path);
+std::unique_ptr<VolumeWAD> CreateWAD(std::unique_ptr<BlobReader> reader);
 std::unique_ptr<VolumeWAD> CreateWAD(const std::string& path);
+std::unique_ptr<Volume> CreateVolume(std::unique_ptr<BlobReader> reader);
 std::unique_ptr<Volume> CreateVolume(const std::string& path);
 
 }  // namespace DiscIO

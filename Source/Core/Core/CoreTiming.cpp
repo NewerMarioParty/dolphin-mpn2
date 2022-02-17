@@ -1,11 +1,9 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/CoreTiming.h"
 
 #include <algorithm>
-#include <cinttypes>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -18,7 +16,7 @@
 #include "Common/Logging/Log.h"
 #include "Common/SPSCQueue.h"
 
-#include "Core/ConfigManager.h"
+#include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
 #include "Core/PowerPC/PowerPC.h"
 
@@ -79,6 +77,11 @@ Globals g;
 
 static EventType* s_ev_lost = nullptr;
 
+static size_t s_registered_config_callback_id;
+static float s_config_OC_factor;
+static float s_config_OC_inv_factor;
+static bool s_config_sync_on_skip_idle;
+
 static void EmptyTimedCallback(u64 userdata, s64 cyclesLate)
 {
 }
@@ -105,9 +108,9 @@ EventType* RegisterEvent(const std::string& name, TimedCallback callback)
   // check for existing type with same name.
   // we want event type names to remain unique so that we can use them for serialization.
   ASSERT_MSG(POWERPC, s_event_types.find(name) == s_event_types.end(),
-             "CoreTiming Event \"%s\" is already registered. Events should only be registered "
+             "CoreTiming Event \"{}\" is already registered. Events should only be registered "
              "during Init to avoid breaking save states.",
-             name.c_str());
+             name);
 
   auto info = s_event_types.emplace(name, EventType{callback, nullptr});
   EventType* event_type = &info.first->second;
@@ -123,8 +126,12 @@ void UnregisterAllEvents()
 
 void Init()
 {
-  s_last_OC_factor = SConfig::GetInstance().m_OCEnable ? SConfig::GetInstance().m_OCFactor : 1.0f;
-  g.last_OC_factor_inverted = 1.0f / s_last_OC_factor;
+  s_registered_config_callback_id =
+      Config::AddConfigChangedCallback([]() { Core::RunAsCPUThread([]() { RefreshConfig(); }); });
+  RefreshConfig();
+
+  s_last_OC_factor = s_config_OC_factor;
+  g.last_OC_factor_inverted = s_config_OC_inv_factor;
   PowerPC::ppcState.downcount = CyclesToDowncount(MAX_SLICE_LENGTH);
   g.slice_length = MAX_SLICE_LENGTH;
   g.global_timer = 0;
@@ -142,15 +149,24 @@ void Init()
 
 void Shutdown()
 {
-  std::lock_guard<std::mutex> lk(s_ts_write_lock);
+  std::lock_guard lk(s_ts_write_lock);
   MoveEvents();
   ClearPendingEvents();
   UnregisterAllEvents();
+  Config::RemoveConfigChangedCallback(s_registered_config_callback_id);
+}
+
+void RefreshConfig()
+{
+  s_config_OC_factor =
+      Config::Get(Config::MAIN_OVERCLOCK_ENABLE) ? Config::Get(Config::MAIN_OVERCLOCK) : 1.0f;
+  s_config_OC_inv_factor = 1.0f / s_config_OC_factor;
+  s_config_sync_on_skip_idle = Config::Get(Config::MAIN_SYNC_ON_SKIP_IDLE);
 }
 
 void DoState(PointerWrap& p)
 {
-  std::lock_guard<std::mutex> lk(s_ts_write_lock);
+  std::lock_guard lk(s_ts_write_lock);
   p.Do(g.slice_length);
   p.Do(g.global_timer);
   p.Do(s_idled_cycles);
@@ -189,9 +205,9 @@ void DoState(PointerWrap& p)
       }
       else
       {
-        WARN_LOG(POWERPC,
-                 "Lost event from savestate because its type, \"%s\", has not been registered.",
-                 name.c_str());
+        WARN_LOG_FMT(POWERPC,
+                     "Lost event from savestate because its type, \"{}\", has not been registered.",
+                     name);
         ev.type = s_ev_lost;
       }
     }
@@ -241,7 +257,7 @@ void ScheduleEvent(s64 cycles_into_future, EventType* event_type, u64 userdata, 
   {
     from_cpu_thread = from == FromThread::CPU;
     ASSERT_MSG(POWERPC, from_cpu_thread == Core::IsCPUThread(),
-               "A \"%s\" event was scheduled from the wrong thread (%s)", event_type->name->c_str(),
+               "A \"{}\" event was scheduled from the wrong thread ({})", *event_type->name,
                from_cpu_thread ? "CPU" : "non-CPU");
   }
 
@@ -260,13 +276,13 @@ void ScheduleEvent(s64 cycles_into_future, EventType* event_type, u64 userdata, 
   {
     if (Core::WantsDeterminism())
     {
-      ERROR_LOG(POWERPC,
-                "Someone scheduled an off-thread \"%s\" event while netplay or "
-                "movie play/record was active.  This is likely to cause a desync.",
-                event_type->name->c_str());
+      ERROR_LOG_FMT(POWERPC,
+                    "Someone scheduled an off-thread \"{}\" event while netplay or "
+                    "movie play/record was active.  This is likely to cause a desync.",
+                    *event_type->name);
     }
 
-    std::lock_guard<std::mutex> lk(s_ts_write_lock);
+    std::lock_guard lk(s_ts_write_lock);
     s_ts_queue.Push(Event{g.global_timer + cycles_into_future, 0, userdata, event_type});
   }
 }
@@ -318,8 +334,8 @@ void Advance()
 
   int cyclesExecuted = g.slice_length - DowncountToCycles(PowerPC::ppcState.downcount);
   g.global_timer += cyclesExecuted;
-  s_last_OC_factor = SConfig::GetInstance().m_OCEnable ? SConfig::GetInstance().m_OCFactor : 1.0f;
-  g.last_OC_factor_inverted = 1.0f / s_last_OC_factor;
+  s_last_OC_factor = s_config_OC_factor;
+  g.last_OC_factor_inverted = s_config_OC_inv_factor;
   g.slice_length = MAX_SLICE_LENGTH;
 
   s_is_global_timer_sane = true;
@@ -329,8 +345,6 @@ void Advance()
     Event evt = std::move(s_event_queue.front());
     std::pop_heap(s_event_queue.begin(), s_event_queue.end(), std::greater<Event>());
     s_event_queue.pop_back();
-    // NOTICE_LOG(POWERPC, "[Scheduler] %-20s (%lld, %lld)", evt.type->name->c_str(),
-    //            g.global_timer, evt.time);
     evt.type->callback(evt.userdata, g.global_timer - evt.time);
   }
 
@@ -358,8 +372,8 @@ void LogPendingEvents()
   std::sort(clone.begin(), clone.end());
   for (const Event& ev : clone)
   {
-    INFO_LOG(POWERPC, "PENDING: Now: %" PRId64 " Pending: %" PRId64 " Type: %s", g.global_timer,
-             ev.time, ev.type->name->c_str());
+    INFO_LOG_FMT(POWERPC, "PENDING: Now: {} Pending: {} Type: {}", g.global_timer, ev.time,
+                 *ev.type->name);
   }
 }
 
@@ -375,7 +389,7 @@ void AdjustEventQueueTimes(u32 new_ppc_clock, u32 old_ppc_clock)
 
 void Idle()
 {
-  if (SConfig::GetInstance().bSyncGPUOnSkipIdleHack)
+  if (s_config_sync_on_skip_idle)
   {
     // When the FIFO is processing data we must not advance because in this way
     // the VI will be desynchronized. So, We are waiting until the FIFO finish and
@@ -383,6 +397,7 @@ void Idle()
     Fifo::FlushGpu();
   }
 
+  PowerPC::UpdatePerformanceMonitor(PowerPC::ppcState.downcount, 0, 0);
   s_idled_cycles += DowncountToCycles(PowerPC::ppcState.downcount);
   PowerPC::ppcState.downcount = 0;
 }

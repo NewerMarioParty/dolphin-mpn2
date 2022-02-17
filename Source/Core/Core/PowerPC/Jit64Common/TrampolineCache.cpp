@@ -1,10 +1,8 @@
 // Copyright 2014 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/PowerPC/Jit64Common/TrampolineCache.h"
 
-#include <cinttypes>
 #include <string>
 
 #include "Common/CommonTypes.h"
@@ -41,7 +39,7 @@ const u8* TrampolineCache::GenerateTrampoline(const TrampolineInfo& info)
 const u8* TrampolineCache::GenerateReadTrampoline(const TrampolineInfo& info)
 {
   if (GetSpaceLeft() < 1024)
-    PanicAlert("Trampoline cache full");
+    PanicAlertFmt("Trampoline cache full");
 
   const u8* trampoline = GetCodePtr();
 
@@ -50,14 +48,14 @@ const u8* TrampolineCache::GenerateReadTrampoline(const TrampolineInfo& info)
 
   JMP(info.start + info.len, true);
 
-  JitRegister::Register(trampoline, GetCodePtr(), "JIT_ReadTrampoline_%x", info.pc);
+  JitRegister::Register(trampoline, GetCodePtr(), "JIT_ReadTrampoline_{:x}", info.pc);
   return trampoline;
 }
 
 const u8* TrampolineCache::GenerateWriteTrampoline(const TrampolineInfo& info)
 {
   if (GetSpaceLeft() < 1024)
-    PanicAlert("Trampoline cache full");
+    PanicAlertFmt("Trampoline cache full");
 
   const u8* trampoline = GetCodePtr();
 
@@ -69,6 +67,6 @@ const u8* TrampolineCache::GenerateWriteTrampoline(const TrampolineInfo& info)
 
   JMP(info.start + info.len, true);
 
-  JitRegister::Register(trampoline, GetCodePtr(), "JIT_WriteTrampoline_%x", info.pc);
+  JitRegister::Register(trampoline, GetCodePtr(), "JIT_WriteTrampoline_{:x}", info.pc);
   return trampoline;
 }

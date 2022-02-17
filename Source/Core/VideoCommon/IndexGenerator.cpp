@@ -1,6 +1,5 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "VideoCommon/IndexGenerator.h"
 
@@ -165,7 +164,7 @@ u16* AddQuads(u16* index_ptr, u32 num_verts, u32 index)
 template <bool pr>
 u16* AddQuads_nonstandard(u16* index_ptr, u32 num_verts, u32 index)
 {
-  WARN_LOG(VIDEO, "Non-standard primitive drawing command GL_DRAW_QUADS_2");
+  WARN_LOG_FMT(VIDEO, "Non-standard primitive drawing command GL_DRAW_QUADS_2");
   return AddQuads<pr>(index_ptr, num_verts, index);
 }
 
@@ -203,25 +202,27 @@ u16* AddPoints(u16* index_ptr, u32 num_verts, u32 index)
 
 void IndexGenerator::Init()
 {
+  using OpcodeDecoder::Primitive;
+
   if (g_Config.backend_info.bSupportsPrimitiveRestart)
   {
-    m_primitive_table[OpcodeDecoder::GX_DRAW_QUADS] = AddQuads<true>;
-    m_primitive_table[OpcodeDecoder::GX_DRAW_QUADS_2] = AddQuads_nonstandard<true>;
-    m_primitive_table[OpcodeDecoder::GX_DRAW_TRIANGLES] = AddList<true>;
-    m_primitive_table[OpcodeDecoder::GX_DRAW_TRIANGLE_STRIP] = AddStrip<true>;
-    m_primitive_table[OpcodeDecoder::GX_DRAW_TRIANGLE_FAN] = AddFan<true>;
+    m_primitive_table[Primitive::GX_DRAW_QUADS] = AddQuads<true>;
+    m_primitive_table[Primitive::GX_DRAW_QUADS_2] = AddQuads_nonstandard<true>;
+    m_primitive_table[Primitive::GX_DRAW_TRIANGLES] = AddList<true>;
+    m_primitive_table[Primitive::GX_DRAW_TRIANGLE_STRIP] = AddStrip<true>;
+    m_primitive_table[Primitive::GX_DRAW_TRIANGLE_FAN] = AddFan<true>;
   }
   else
   {
-    m_primitive_table[OpcodeDecoder::GX_DRAW_QUADS] = AddQuads<false>;
-    m_primitive_table[OpcodeDecoder::GX_DRAW_QUADS_2] = AddQuads_nonstandard<false>;
-    m_primitive_table[OpcodeDecoder::GX_DRAW_TRIANGLES] = AddList<false>;
-    m_primitive_table[OpcodeDecoder::GX_DRAW_TRIANGLE_STRIP] = AddStrip<false>;
-    m_primitive_table[OpcodeDecoder::GX_DRAW_TRIANGLE_FAN] = AddFan<false>;
+    m_primitive_table[Primitive::GX_DRAW_QUADS] = AddQuads<false>;
+    m_primitive_table[Primitive::GX_DRAW_QUADS_2] = AddQuads_nonstandard<false>;
+    m_primitive_table[Primitive::GX_DRAW_TRIANGLES] = AddList<false>;
+    m_primitive_table[Primitive::GX_DRAW_TRIANGLE_STRIP] = AddStrip<false>;
+    m_primitive_table[Primitive::GX_DRAW_TRIANGLE_FAN] = AddFan<false>;
   }
-  m_primitive_table[OpcodeDecoder::GX_DRAW_LINES] = AddLineList;
-  m_primitive_table[OpcodeDecoder::GX_DRAW_LINE_STRIP] = AddLineStrip;
-  m_primitive_table[OpcodeDecoder::GX_DRAW_POINTS] = AddPoints;
+  m_primitive_table[Primitive::GX_DRAW_LINES] = AddLineList;
+  m_primitive_table[Primitive::GX_DRAW_LINE_STRIP] = AddLineStrip;
+  m_primitive_table[Primitive::GX_DRAW_POINTS] = AddPoints;
 }
 
 void IndexGenerator::Start(u16* index_ptr)
@@ -231,7 +232,7 @@ void IndexGenerator::Start(u16* index_ptr)
   m_base_index = 0;
 }
 
-void IndexGenerator::AddIndices(int primitive, u32 num_vertices)
+void IndexGenerator::AddIndices(OpcodeDecoder::Primitive primitive, u32 num_vertices)
 {
   m_index_buffer_current =
       m_primitive_table[primitive](m_index_buffer_current, num_vertices, m_base_index);

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
 package org.dolphinemu.dolphinemu.ui.platform;
 
 /**
@@ -22,7 +24,17 @@ public interface PlatformGamesView
   void onItemClick(String gameId);
 
   /**
+   * Shows or hides the loading indicator.
+   */
+  void setRefreshing(boolean refreshing);
+
+  /**
    * To be called when the game file cache is updated.
    */
   void showGames();
+
+  /**
+   * Re-fetches game metadata from the game file cache.
+   */
+  void refetchMetadata();
 }
